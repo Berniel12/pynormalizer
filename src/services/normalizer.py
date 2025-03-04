@@ -995,6 +995,26 @@ class TenderNormalizer:
                         logger.info(f"Found URL from field {url_field}: {clean_url_value}")
                         break
             
+            # If we found a URL but not an official source URL, check if it matches the source domain
+            if url_found and not source_url_found and "url" in normalized_data:
+                # Map of source tables to their official domains
+                source_domains = {
+                    "aiib": "aiib.org",
+                    "adb": "adb.org",
+                    "wb": "worldbank.org",
+                    "afdb": "afdb.org",
+                    "ted_eu": "ted.europa.eu",
+                    "ungm": "ungm.org",
+                    "sam_gov": "sam.gov"
+                }
+                
+                # Check if URL contains the official domain for this source
+                domain = source_domains.get(tender.source_table)
+                if domain and domain in normalized_data["url"]:
+                    normalized_data["source_url"] = normalized_data["url"]
+                    source_url_found = True
+                    logger.info(f"Recognized official {tender.source_table} URL by domain: {normalized_data['url']}")
+            
             # If we found a URL but not an official source URL, collect all other URLs as document_links
             for url_field in source_url_fields:
                 # Skip the field we already used for the main URL
@@ -1095,6 +1115,40 @@ class TenderNormalizer:
                     contact_info["email"] = emails[0]
                     normalized_data["contact_email"] = emails[0]
                     logger.info(f"Extracted email from description: {emails[0]}")
+            
+            # For AIIB and other tenders, also check pdf_content for contact information
+            if "email" not in contact_info and tender.source_table in ["aiib", "afdb", "adb"]:
+                # Check if pdf_content exists in the raw data
+                pdf_content = getattr(tender, "pdf_content", None)
+                if pdf_content and isinstance(pdf_content, str):
+                    # Extract emails from PDF content
+                    emails = extract_emails_from_text(pdf_content)
+                    if emails:
+                        contact_info["email"] = emails[0]
+                        normalized_data["contact_email"] = emails[0]
+                        logger.info(f"Extracted email from pdf_content: {emails[0]}")
+                        
+                        # Look for contact name near the email
+                        # Common patterns like "contact: Name (email@example.com)" or "email: email@example.com"
+                        email_context = pdf_content.split(emails[0], 1)[0]  # Get text before the email
+                        last_lines = email_context.split('\n')[-3:]  # Get last few lines before email
+                        
+                        # Join the lines and look for contact indicators
+                        context_text = ' '.join(last_lines)
+                        contact_indicators = ["contact", "email", "inquiries", "information", "correspondence"]
+                        
+                        for indicator in contact_indicators:
+                            if indicator.lower() in context_text.lower():
+                                # Extract potential name (text between indicator and email)
+                                pattern = re.compile(f"{indicator}[s]?[:\\s]+(.*)", re.IGNORECASE)
+                                match = pattern.search(context_text)
+                                if match and match.group(1) and len(match.group(1)) < 100:  # Reasonable name length
+                                    potential_name = match.group(1).strip()
+                                    if potential_name and "email" not in potential_name.lower():
+                                        contact_info["name"] = potential_name
+                                        normalized_data["contact_name"] = potential_name
+                                        logger.info(f"Extracted contact name from pdf_content: {potential_name}")
+                                        break
             
             # If we have any contact info, add it in both formats
             if contact_info:
@@ -1919,11 +1973,11 @@ class TenderNormalizer:
             "afd_tenders": ["notice_url", "link"],  # AFD official notice URL
             "iadb": ["link", "project_url"],  # IADB official project/tender link
             "afdb": ["tender_url", "link"],  # AfDB official tender URL
-            "aiib": ["link", "notice_url"]  # AIIB official link
+            "aiib": ["url", "link", "notice_url"]  # AIIB URLs can be in url or link fields
         }
         
         # Secondary URL fields - these might contain related but not primary URLs
-        secondary_fields = ["url", "web_link", "document_url", "related_link"]
+        secondary_fields = ["web_link", "document_url", "related_link"]
         
         # Get the primary fields for this source, or use an empty list if not found
         primary_fields = source_primary_fields.get(source_table, [])
