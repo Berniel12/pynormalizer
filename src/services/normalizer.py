@@ -956,49 +956,43 @@ class TenderNormalizer:
             
             # If no primary URL found, check other URL fields
             if not url_found:
-                # For SAM.gov, try to construct URL from opportunity_id before checking other fields
-                if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id") and tender.opportunity_id:
-                    opportunity_id = tender.opportunity_id
-                    # Construct the SAM.gov URL
-                    constructed_url = f"https://sam.gov/opp/{opportunity_id}/view"
-                    normalized_data["url"] = constructed_url
-                    normalized_data["source_url"] = constructed_url  # This is the official source URL
-                    url_found = True
-                    source_url_found = True
-                    logger.info(f"Constructed official SAM.gov URL from opportunity_id: {constructed_url}")
-                else:
-                    for url_field in source_url_fields[2:]:  # Check remaining URL fields
-                        if url_field in tender_dict and tender_dict[url_field]:
-                            normalized_data["url"] = tender_dict[url_field]
-                            url_found = True
-                            logger.info(f"Found URL from field {url_field}: {tender_dict[url_field]}")
-                            break
-            
-            # Extract URLs from description and other text fields ONLY as a last resort fallback
-            if not url_found:
-                # For SAM.gov, try to construct URL from opportunity_id before extracting from description
-                if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id") and tender.opportunity_id:
-                    opportunity_id = tender.opportunity_id
-                    # Construct the SAM.gov URL
-                    constructed_url = f"https://sam.gov/opp/{opportunity_id}/view"
-                    normalized_data["url"] = constructed_url
-                    normalized_data["source_url"] = constructed_url  # This is the official source URL
-                    url_found = True
-                    source_url_found = True
-                    logger.info(f"Constructed official SAM.gov URL from opportunity_id: {constructed_url}")
-                # Only extract from description if we couldn't construct an official URL
-                elif "description" in normalized_data and normalized_data["description"]:
-                    urls = extract_urls_from_text(normalized_data["description"])
-                    if urls:
-                        normalized_data["url"] = urls[0]
-                        url_found = True
-                        logger.info(f"Extracted URL from description as last resort: {urls[0]}")
-                        
-                        # Add remaining URLs as document links
-                        if len(urls) > 1:
+                for url_field in url_field_names:
+                    if url_field in normalized_data and normalized_data[url_field]:
+                        # If we already have a primary URL but found another one, add it to document_links
+                        if url_found and url_field != "url":
                             normalized_data.setdefault("document_links", [])
-                            for url in urls[1:]:
-                                normalized_data["document_links"].append({"url": url})
+                            normalized_data["document_links"].append({"url": normalized_data[url_field]})
+                        else:
+                            # Set as primary URL if we don't have one yet
+                            normalized_data["url"] = normalized_data[url_field]
+                            url_found = True
+                    
+                    # Also check tender attributes and source_data
+                    if not url_found or url_field != "url":
+                        url_value = getattr(tender, url_field, None)
+                        if url_value is None and hasattr(tender, "source_data") and tender.source_data:
+                            url_value = tender.source_data.get(url_field)
+                        
+                        if url_value and str(url_value).strip():
+                            if url_found and url_field != "url":
+                                normalized_data.setdefault("document_links", [])
+                                normalized_data["document_links"].append({"url": url_value})
+                            else:
+                                normalized_data["url"] = url_value
+                                url_found = True
+            
+            # Extract URLs from description and other text fields only as a fallback
+            if not url_found and "description" in normalized_data and normalized_data["description"]:
+                urls = extract_urls_from_text(normalized_data["description"])
+                if urls:
+                    normalized_data["url"] = urls[0]  # Use the first URL
+                    url_found = True
+                    logger.info(f"Extracted URL from description: {urls[0]}")
+                    
+                    if len(urls) > 1:
+                        normalized_data.setdefault("document_links", [])
+                        for url in urls[1:]:
+                            normalized_data["document_links"].append({"url": url})
             
             # Log if no URL was found
             if not url_found:
@@ -1126,9 +1120,12 @@ class TenderNormalizer:
             
             # If URL is still missing, try to construct it for specific sources
             if "url" not in normalized_data or not normalized_data["url"]:
-                # This code has been moved earlier in the function to prioritize construction of SAM.gov URLs
-                # before falling back to extracting URLs from description
-                pass
+                # For SAM.gov, construct URL from opportunity_id
+                if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id"):
+                    opportunity_id = tender.opportunity_id
+                    # Construct the SAM.gov URL
+                    normalized_data["url"] = f"https://sam.gov/opp/{opportunity_id}/view"
+                    logger.info(f"Constructed SAM.gov URL from opportunity_id: {normalized_data['url']}")
             
             # Ensure all critical fields are present
             self._ensure_critical_fields(normalized_data, tender)
