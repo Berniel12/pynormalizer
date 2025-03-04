@@ -178,98 +178,127 @@ class SupabaseClient:
                 unified_tender["estimated_value"] = tender_dict["value"]
                 unified_tender["currency"] = tender_dict.get("currency")
             
+            # Check if tender already exists in unified_tenders table
+            source_table = tender_dict.get("source_table")
+            source_id = tender_dict.get("source_id") or tender_dict.get("id")
+            
+            exists_response = client.table("unified_tenders").select("id").eq("source_table", source_table).eq("source_id", source_id).execute()
+            
+            # If tender already exists, log the situation and consider it a success (avoid duplicate key error)
+            if exists_response.data and len(exists_response.data) > 0:
+                logger.info(f"Tender {source_id} from {source_table} already exists in unified_tenders, skipping insert")
+                
+                # Still mark the original tender as processed
+                await self._mark_tender_as_processed(client, tender)
+                
+                return True
+            
             # Insert into unified_tenders table
             response = client.table("unified_tenders").insert(unified_tender).execute()
             
             if response.data:
                 # Update the original tender to mark it as processed
-                update_response = None
-                try:
-                    # Different tables may have different primary key field names
-                    if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id"):
-                        # For sam_gov, the primary key is opportunity_id
-                        update_response = (
-                            client.table(tender.source_table)
-                            .update({"processed": True})
-                            .eq("opportunity_id", getattr(tender, "opportunity_id", tender.id))
-                            .execute()
-                        )
-                    elif tender.source_table == "iadb" and hasattr(tender, "project_number"):
-                        # For iadb, we can use project_number
-                        update_response = (
-                            client.table(tender.source_table)
-                            .update({"processed": True})
-                            .eq("project_number", getattr(tender, "project_number", tender.id))
-                            .execute()
-                        )
-                    elif hasattr(tender, "source_id") and tender.source_id:
-                        # Try using source_id as the primary key - this seems to be failing
-                        # Let's modify this to use other fields
-                        try:
-                            # Map source tables to their known primary key fields based on error messages
-                            table_pk_map = {
-                                "sam_gov": "opportunity_id",
-                                "wb": "notice_id",
-                                "adb": "id",
-                                "ted_eu": "id",
-                                "ungm": "id",
-                                "afd_tenders": "id",
-                                "iadb": "project_number",
-                                "afdb": "id",
-                                "aiib": "id"
-                            }
-                            
-                            pk_field = table_pk_map.get(tender.source_table, "id")
-                            pk_value = tender.id
-                            
-                            # For sam_gov, we might need to get opportunity_id from original data
-                            if tender.source_table == "sam_gov" and tender.source_data and "opportunity_id" in tender.source_data:
-                                pk_value = tender.source_data["opportunity_id"]
-                            
-                            # Log what we're trying to use for debugging
-                            logger.info(f"Updating processed flag for {tender.source_table} using {pk_field}={pk_value}")
-                            
-                            update_response = (
-                                client.table(tender.source_table)
-                                .update({"processed": True})
-                                .eq(pk_field, pk_value)
-                                .execute()
-                            )
-                        except Exception as e:
-                            logger.error(f"Error updating processed flag using mapped PK for {tender.source_table}: {str(e)}")
-                    else:
-                        # Try some common primary key names
-                        for pk_field in ["id", "tender_id", "_id", "notice_id", "record_id"]:
-                            try:
-                                update_response = (
-                                    client.table(tender.source_table)
-                                    .update({"processed": True})
-                                    .eq(pk_field, tender.id)
-                                    .execute()
-                                )
-                                break
-                            except Exception:
-                                continue
-                        
-                        # If all attempts failed, log a warning but don't fail the save
-                        if not update_response:
-                            logger.warning(
-                                f"Could not update processed flag for {tender.source_table} tender {tender.id}. "
-                                f"Consider manually marking it as processed."
-                            )
-                    
-                    logger.info(f"Saved unified tender from {tender.source_table} with source ID {tender.id}")
-                    return True
-                except Exception as e:
-                    logger.error(f"Error updating processed flag: {str(e)}")
-                    # Still return True because the unified tender was saved successfully
-                    return True
+                await self._mark_tender_as_processed(client, tender)
+                
+                logger.info(f"Saved unified tender from {tender.source_table} with source ID {tender.id}")
+                return True
             
             return False
         
         except Exception as e:
             logger.error(f"Error saving unified tender {tender.id}: {str(e)}")
             return False
+    
+    async def _mark_tender_as_processed(self, client, tender):
+        """
+        Mark a tender as processed in its source table.
+        
+        Args:
+            client: The Supabase client
+            tender: The tender to mark as processed
+            
+        Returns:
+            The update response or None if an error occurred
+        """
+        update_response = None
+        try:
+            # Different tables may have different primary key field names
+            if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id"):
+                # For sam_gov, the primary key is opportunity_id
+                update_response = (
+                    client.table(tender.source_table)
+                    .update({"processed": True})
+                    .eq("opportunity_id", getattr(tender, "opportunity_id", tender.id))
+                    .execute()
+                )
+            elif tender.source_table == "iadb" and hasattr(tender, "project_number"):
+                # For iadb, we can use project_number
+                update_response = (
+                    client.table(tender.source_table)
+                    .update({"processed": True})
+                    .eq("project_number", getattr(tender, "project_number", tender.id))
+                    .execute()
+                )
+            elif hasattr(tender, "source_id") and tender.source_id:
+                # Try using source_id as the primary key - this seems to be failing
+                # Let's modify this to use other fields
+                try:
+                    # Map source tables to their known primary key fields based on error messages
+                    table_pk_map = {
+                        "sam_gov": "opportunity_id",
+                        "wb": "notice_id",
+                        "adb": "id",
+                        "ted_eu": "id",
+                        "ungm": "id",
+                        "afd_tenders": "id",
+                        "iadb": "project_number",
+                        "afdb": "id",  
+                        "aiib": "id"   
+                    }
+                    
+                    pk_field = table_pk_map.get(tender.source_table, "id")
+                    pk_value = tender.id
+                    
+                    # For sam_gov, we might need to get opportunity_id from original data
+                    if tender.source_table == "sam_gov" and tender.source_data and "opportunity_id" in tender.source_data:
+                        pk_value = tender.source_data["opportunity_id"]
+                    
+                    # Log what we're trying to use for debugging
+                    logger.info(f"Updating processed flag for {tender.source_table} using {pk_field}={pk_value}")
+                    
+                    update_response = (
+                        client.table(tender.source_table)
+                        .update({"processed": True})
+                        .eq(pk_field, pk_value)
+                        .execute()
+                    )
+                except Exception as e:
+                    logger.error(f"Error updating processed flag using mapped PK for {tender.source_table}: {str(e)}")
+            else:
+                # Try some common primary key names
+                for pk_field in ["id", "tender_id", "_id", "notice_id", "record_id"]:
+                    try:
+                        update_response = (
+                            client.table(tender.source_table)
+                            .update({"processed": True})
+                            .eq(pk_field, tender.id)
+                            .execute()
+                        )
+                        break
+                    except Exception:
+                        continue
+                
+                # If all attempts failed, log a warning but don't fail the save
+                if not update_response:
+                    logger.warning(
+                        f"Could not update processed flag for {tender.source_table} tender {tender.id}. "
+                        f"Consider manually marking it as processed."
+                    )
+            
+            return update_response
+        except Exception as e:
+            logger.error(f"Error updating processed flag: {str(e)}")
+            return None
 
 
 # Create a singleton instance
