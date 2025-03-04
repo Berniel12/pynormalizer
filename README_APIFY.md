@@ -30,12 +30,31 @@ The following environment variables should be configured in your Apify actor:
 
 ### Running the Actor
 
-The actor will automatically:
+The actor runs in test mode by default:
+1. By default, it processes 3 tenders per source with extensive analysis logging
+2. To process more tenders, set the `limit` parameter
+3. To disable test mode and process all tenders in the normal mode, set `testMode` to `false`
+
+In test mode, the actor will:
 1. Connect to Supabase
-2. Retrieve unprocessed tenders from all sources
-3. Normalize them using LLM or rule-based methods as appropriate
+2. Retrieve a small number of unprocessed tenders from each source
+3. Normalize them with detailed logging of the process
 4. Save the normalized tenders back to Supabase
-5. Log performance statistics
+5. Provide comprehensive analysis logs in the key-value store
+
+## Analysis Logs
+
+When running in test mode, detailed analysis logs are saved to:
+- The Apify key-value store as `normalization_analysis.log`
+- Standard output (visible in the Apify console)
+
+These logs contain:
+- Field comparison (raw vs. normalized)
+- URL extraction analysis
+- Contact information tracking
+- Success/failure statistics
+- Error patterns and suggestions
+- Field extraction success rates
 
 ## File Structure
 

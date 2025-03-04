@@ -303,10 +303,15 @@ def main() -> None:
     apify_input = get_apify_input()
     source_name = apify_input.get("sourceName")
     limit = int(apify_input.get("limit", settings.batch_size))
-    test_mode = apify_input.get("testMode", False)
+    
+    # Default to test mode unless explicitly set to False
+    test_mode = apify_input.get("testMode", True)
     
     # Process tenders
     if test_mode:
+        # Use a smaller default limit for test mode if not explicitly set
+        if "limit" not in apify_input and limit == settings.batch_size:
+            limit = 3
         logger.info(f"Running in TEST MODE with {limit} tenders per source")
         results = process_all_tenders(limit, None, test_mode=True)
     elif source_name:

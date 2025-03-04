@@ -60,8 +60,8 @@
       "testMode": {
         "title": "Test Mode",
         "type": "boolean",
-        "description": "Run in test mode with detailed analysis logging (if true, limit defaults to 3)",
-        "default": false,
+        "description": "Run in test mode with detailed analysis logging (only processes 3 tenders per source by default)",
+        "default": true,
         "editor": "checkbox"
       }
     },
