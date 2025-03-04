@@ -306,9 +306,8 @@ class TenderNormalizer:
                 
         # Set up the agent for normalization
         self.agent = Agent(
-            settings.openai_model,
+            model=settings.openai_model,
             result_type=NormalizationOutput,
-            system_prompt=self._get_system_prompt(),
         )
         
         # Performance tracking
