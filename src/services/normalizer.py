@@ -1763,7 +1763,7 @@ class TenderNormalizer:
                         if url_values:
                             matching = False
                             for url_value in url_values.values():
-                                if url_value and normalized_data["url"] in url_value or url_value in normalized_data["url"]:
+                                if url_value and (str(normalized_data["url"]) in str(url_value) or str(url_value) in str(normalized_data["url"])):
                                     matching = True
                                     break
                             analysis_logger.info(f"{tender_log_prefix} URL MATCHES SOURCE: {matching}")
