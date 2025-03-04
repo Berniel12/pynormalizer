@@ -305,18 +305,11 @@ class TenderNormalizer:
                 os.environ["OPENAI_API_KEY"] = settings.openai_api_key.get_secret_value()
                 
         # Set up the agent for normalization
-        try:
-            self.agent = Agent(
-                settings.openai_model,
-                result_type=NormalizationOutput,
-                system_prompt=self._get_system_prompt(),
-            )
-        except TypeError:
-            # Fallback if the Agent constructor signature is different
-            self.agent = Agent(
-                result_type=NormalizationOutput,
-                description=self._get_system_prompt(),
-            )
+        self.agent = Agent(
+            settings.openai_model,
+            result_type=NormalizationOutput,
+            system_prompt=self._get_system_prompt(),
+        )
         
         # Performance tracking
         self.performance_stats = {
@@ -456,10 +449,11 @@ class TenderNormalizer:
             # Create a run context (will be passed to the agent)
             context = None
             try:
-                # For pydantic-ai version 0.0.19 which is currently installed
-                logger.debug("Creating RunContext with version 0.0.19 signature")
+                # For pydantic-ai version 0.0.31
+                logger.debug("Creating RunContext with version 0.0.31 signature")
                 context = RunContext(
                     deps={},  # Empty dependencies dictionary
+                    model=settings.openai_model,  # Use model name from settings
                     usage={},  # Empty usage tracking dictionary
                     prompt=self._get_system_prompt()  # System prompt
                 )
