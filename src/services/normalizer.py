@@ -65,7 +65,6 @@ class TenderNormalizer:
             settings.openai_model,
             result_type=NormalizationOutput,
             system_prompt=self._get_system_prompt(),
-            instrument=bool(settings.logfire_token),
         )
         
         # Performance tracking
