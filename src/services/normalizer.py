@@ -456,37 +456,15 @@ class TenderNormalizer:
             # Create a run context (will be passed to the agent)
             context = None
             try:
-                # Try the version that should be installed in Docker (0.0.31)
-                logger.debug("Trying to create RunContext with version 0.0.31 signature")
+                # For pydantic-ai version 0.0.19 which is currently installed
+                logger.debug("Creating RunContext with version 0.0.19 signature")
                 context = RunContext(
-                    system_prompt=self._get_system_prompt(),
-                    model=settings.openai_model,
-                    provider="openai"
+                    deps={},  # Empty dependencies dictionary
+                    usage={},  # Empty usage tracking dictionary
+                    prompt=self._get_system_prompt()  # System prompt
                 )
-            except (TypeError, ValueError) as e:
-                logger.warning(f"Error creating RunContext with system_prompt/model/provider: {str(e)}")
-                try:
-                    # Try newer pydantic-ai API
-                    logger.debug("Trying to create RunContext with newer API")
-                    context = RunContext(model="mistral")
-                except TypeError:
-                    # Try older pydantic-ai API
-                    try:
-                        logger.debug("Trying to create RunContext with older API")
-                        context = RunContext(
-                            deps={},
-                            model="mistral", 
-                            usage={},
-                            prompt=self._get_system_prompt()
-                        )
-                    except Exception as e:
-                        logger.warning(f"Error creating RunContext with deps/model/usage/prompt: {str(e)}")
-                        # Last resort fallback
-                        try:
-                            logger.debug("Trying to create basic RunContext")
-                            context = RunContext()
-                        except Exception as e:
-                            logger.error(f"All attempts to create RunContext failed: {str(e)}")
+            except Exception as e:
+                logger.error(f"Failed to create RunContext: {str(e)}")
             
             # Run the normalization
             if context is not None:
