@@ -4,6 +4,7 @@ Tender normalization service using PydanticAI.
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TypeVar, Union
@@ -60,6 +61,13 @@ class TenderNormalizer:
 
     def __init__(self) -> None:
         """Initialize the tender normalizer."""
+        # Set OpenAI API key in environment if not already set
+        if "OPENAI_API_KEY" not in os.environ:
+            if "OPENAI_KEY" in os.environ:
+                os.environ["OPENAI_API_KEY"] = os.environ["OPENAI_KEY"]
+            elif settings.openai_api_key.get_secret_value():
+                os.environ["OPENAI_API_KEY"] = settings.openai_api_key.get_secret_value()
+                
         # Set up the agent for normalization
         self.agent = Agent(
             settings.openai_model,
