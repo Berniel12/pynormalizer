@@ -20,9 +20,17 @@ def main():
     parser.add_argument(
         "--limit", "-l", type=int, default=25, help="Maximum number of tenders to process per source"
     )
+    parser.add_argument(
+        "--test", "-t", action="store_true", help="Run in test mode with limited tenders and extensive logging"
+    )
     args = parser.parse_args()
 
-    if args.source:
+    if args.test:
+        # Process in test mode with extensive logging
+        test_limit = args.limit if args.limit != 25 else 3  # Default to 3 for test mode
+        print(f"Running in TEST MODE with {test_limit} tenders per source and extensive logging")
+        process_all_tenders(test_limit, args.source, test_mode=True)
+    elif args.source:
         # Process only the specified source
         import asyncio
         asyncio.run(process_source(args.source, args.limit))

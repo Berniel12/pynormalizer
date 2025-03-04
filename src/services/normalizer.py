@@ -1467,60 +1467,208 @@ class TenderNormalizer:
         """
         results_by_source = {}
         
+        # Set up a dedicated analysis log file
+        analysis_log_path = "normalization_analysis.log"
+        analysis_logger = logging.getLogger("normalization_analysis")
+        
+        # If the handler doesn't exist, add it
+        if not any(isinstance(h, logging.FileHandler) and h.baseFilename.endswith("normalization_analysis.log") for h in analysis_logger.handlers):
+            file_handler = logging.FileHandler(analysis_log_path)
+            file_formatter = logging.Formatter('%(asctime)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            analysis_logger.addHandler(file_handler)
+            analysis_logger.setLevel(logging.INFO)
+        
+        analysis_logger.info("===== STARTING NEW TEST BATCH ANALYSIS =====")
+        
         for source_table, tenders in tenders_by_source.items():
-            logger.info(f"==== PROCESSING TEST BATCH FOR {source_table} ====")
+            header = f"==== PROCESSING TEST BATCH FOR {source_table} ===="
+            logger.info(header)
+            analysis_logger.info(header)
             logger.info(f"Test batch contains {len(tenders)} tenders")
+            
+            # Track source-specific stats
+            source_stats = {
+                "success_count": 0,
+                "llm_count": 0,
+                "fallback_count": 0,
+                "failure_count": 0,
+                "fields_extracted": {},
+                "fields_missing": {},
+                "common_errors": {}
+            }
             
             # Process each tender individually for detailed logging
             source_results = []
             for i, tender in enumerate(tenders):
-                logger.info(f"[{source_table}] Processing test tender {i+1}/{len(tenders)}: {tender.id}")
+                tender_log_prefix = f"[{source_table}:{tender.id}]"
+                logger.info(f"{tender_log_prefix} Processing test tender {i+1}/{len(tenders)}")
+                analysis_logger.info(f"\n{'-'*80}\n{tender_log_prefix} TENDER ANALYSIS\n{'-'*80}")
                 
                 # Log raw tender data
-                logger.info(f"[{source_table}:{tender.id}] RAW TENDER DATA:")
+                logger.info(f"{tender_log_prefix} RAW TENDER DATA:")
                 tender_dict = tender.model_dump()
+                
+                # Log detailed tender data to analysis log
+                analysis_logger.info(f"{tender_log_prefix} COMPLETE RAW TENDER DATA:")
+                for field, value in tender_dict.items():
+                    # Skip empty or None values
+                    if value is None or (isinstance(value, str) and not value.strip()):
+                        analysis_logger.info(f"{tender_log_prefix} Field '{field}': <EMPTY>")
+                    elif isinstance(value, (dict, list)):
+                        analysis_logger.info(f"{tender_log_prefix} Field '{field}': {json.dumps(value, indent=2, ensure_ascii=False)}")
+                    else:
+                        analysis_logger.info(f"{tender_log_prefix} Field '{field}': {value}")
                 
                 # Log source-specific URL fields
                 url_fields = self._get_url_fields_for_source(source_table)
                 url_values = {}
                 for field in url_fields:
-                    if field in tender_dict:
+                    if field in tender_dict and tender_dict[field]:
                         url_values[field] = tender_dict[field]
-                    elif hasattr(tender, "source_data") and tender.source_data and field in tender.source_data:
+                    elif hasattr(tender, "source_data") and tender.source_data and field in tender.source_data and tender.source_data[field]:
                         url_values[field] = tender.source_data[field]
                 
                 if url_values:
-                    logger.info(f"[{source_table}:{tender.id}] URL FIELDS: {url_values}")
+                    logger.info(f"{tender_log_prefix} URL FIELDS: {url_values}")
+                    analysis_logger.info(f"{tender_log_prefix} SOURCE URL FIELDS FOUND: {json.dumps(url_values, indent=2)}")
                 else:
-                    logger.info(f"[{source_table}:{tender.id}] NO URL FIELDS FOUND")
+                    logger.info(f"{tender_log_prefix} NO URL FIELDS FOUND")
+                    analysis_logger.info(f"{tender_log_prefix} NO SOURCE URL FIELDS FOUND - This is a potential issue")
+                
+                # Analyze text fields for potential information
+                for field in ["title", "description", "organization_name"]:
+                    if field in tender_dict and tender_dict[field]:
+                        # Look for URLs in text
+                        urls = self._extract_urls_from_text(tender_dict[field])
+                        if urls:
+                            analysis_logger.info(f"{tender_log_prefix} URLS FOUND IN {field}: {urls}")
+                        
+                        # Look for email addresses
+                        emails = self._extract_emails_from_text(tender_dict[field])
+                        if emails:
+                            analysis_logger.info(f"{tender_log_prefix} EMAILS FOUND IN {field}: {emails}")
+                        
+                        # Log field length metrics
+                        analysis_logger.info(f"{tender_log_prefix} {field.upper()} LENGTH: {len(str(tender_dict[field]))} characters")
+                
+                # Record normalization start time for detailed timing
+                start_time = time.perf_counter()
+                
+                # Log which method will be used (LLM or fallback)
+                should_use_llm, reason = self._should_use_llm(tender)
+                analysis_logger.info(f"{tender_log_prefix} NORMALIZATION METHOD: {'LLM' if should_use_llm else 'Fallback'} ({reason})")
                 
                 # Normalize the tender
                 result = await self.normalize_tender(tender)
                 source_results.append(result)
                 
-                # Log result
+                # Update source stats
+                if result.success:
+                    source_stats["success_count"] += 1
+                    if result.method_used == "llm":
+                        source_stats["llm_count"] += 1
+                    else:
+                        source_stats["fallback_count"] += 1
+                else:
+                    source_stats["failure_count"] += 1
+                    error = str(result.error)
+                    source_stats["common_errors"][error] = source_stats["common_errors"].get(error, 0) + 1
+                
+                # Log detailed result
                 if result.success and result.normalized_tender:
-                    logger.info(f"[{source_table}:{tender.id}] NORMALIZATION SUCCESSFUL ({result.method_used})")
+                    logger.info(f"{tender_log_prefix} NORMALIZATION SUCCESSFUL ({result.method_used})")
+                    analysis_logger.info(f"{tender_log_prefix} NORMALIZATION SUCCESSFUL using {result.method_used.upper()}")
+                    analysis_logger.info(f"{tender_log_prefix} Processing time: {result.processing_time:.2f} seconds")
+                    
+                    # Get normalized data for comparison
+                    normalized_data = result.normalized_tender.model_dump()
+                    
+                    # Log comprehensive field comparison
+                    analysis_logger.info(f"{tender_log_prefix} FIELD COMPARISON (RAW → NORMALIZED):")
+                    
+                    # Define fields to explicitly compare
+                    important_fields = [
+                        "title", "description", "country", "organization_name", "url", 
+                        "contact_name", "contact_email", "contact_phone", "contact_address",
+                        "tender_type", "status", "publication_date", "deadline_date",
+                        "value", "currency"
+                    ]
+                    
+                    for field in important_fields:
+                        raw_value = "N/A"
+                        if field in tender_dict:
+                            raw_value = tender_dict[field]
+                        elif hasattr(tender, "source_data") and tender.source_data and field in tender.source_data:
+                            raw_value = tender.source_data[field]
+                        
+                        norm_value = normalized_data.get(field, "N/A")
+                        
+                        # Track field extraction success
+                        if norm_value and norm_value != "N/A":
+                            source_stats["fields_extracted"][field] = source_stats["fields_extracted"].get(field, 0) + 1
+                        else:
+                            source_stats["fields_missing"][field] = source_stats["fields_missing"].get(field, 0) + 1
+                            
+                        analysis_logger.info(f"{tender_log_prefix} {field}: {raw_value} → {norm_value}")
                     
                     # Log URL extraction results
-                    normalized_data = result.normalized_tender.model_dump()
                     if "url" in normalized_data and normalized_data["url"]:
-                        logger.info(f"[{source_table}:{tender.id}] EXTRACTED URL: {normalized_data['url']}")
+                        logger.info(f"{tender_log_prefix} EXTRACTED URL: {normalized_data['url']}")
+                        analysis_logger.info(f"{tender_log_prefix} URL EXTRACTION SUCCESSFUL: {normalized_data['url']}")
+                        
+                        # Compare with source URLs
+                        if url_values:
+                            matching = False
+                            for url_value in url_values.values():
+                                if url_value and normalized_data["url"] in url_value or url_value in normalized_data["url"]:
+                                    matching = True
+                                    break
+                            analysis_logger.info(f"{tender_log_prefix} URL MATCHES SOURCE: {matching}")
                     else:
-                        logger.info(f"[{source_table}:{tender.id}] NO URL EXTRACTED")
+                        logger.info(f"{tender_log_prefix} NO URL EXTRACTED")
+                        analysis_logger.info(f"{tender_log_prefix} URL EXTRACTION FAILED - This is a critical issue")
+                        
+                        # Log possible URLs from text if no URL was extracted
+                        for field in ["title", "description", "organization_name"]:
+                            if field in tender_dict and tender_dict[field]:
+                                urls = self._extract_urls_from_text(tender_dict[field])
+                                if urls:
+                                    analysis_logger.info(f"{tender_log_prefix} MISSED URLS IN {field}: {urls}")
                     
                     # Log contact extraction results
                     contact_fields = ["contact_name", "contact_email", "contact_phone", "contact_address"]
                     extracted_contacts = {f: normalized_data.get(f) for f in contact_fields if f in normalized_data and normalized_data.get(f)}
                     if extracted_contacts:
-                        logger.info(f"[{source_table}:{tender.id}] EXTRACTED CONTACTS: {extracted_contacts}")
+                        logger.info(f"{tender_log_prefix} EXTRACTED CONTACTS: {extracted_contacts}")
+                        analysis_logger.info(f"{tender_log_prefix} CONTACT EXTRACTION SUCCESSFUL: {json.dumps(extracted_contacts, indent=2)}")
                     else:
-                        logger.info(f"[{source_table}:{tender.id}] NO CONTACTS EXTRACTED")
+                        logger.info(f"{tender_log_prefix} NO CONTACTS EXTRACTED")
+                        analysis_logger.info(f"{tender_log_prefix} CONTACT EXTRACTION FAILED - Should investigate")
+                        
+                        # Check if contact information might be in the description
+                        if "description" in tender_dict and tender_dict["description"]:
+                            emails = self._extract_emails_from_text(tender_dict["description"])
+                            if emails:
+                                analysis_logger.info(f"{tender_log_prefix} MISSED EMAILS IN DESCRIPTION: {emails}")
                     
                     # Log field counts
-                    logger.info(f"[{source_table}:{tender.id}] FIELDS: {result.fields_before} → {result.fields_after} ({result.improvement_percentage:.1f}% improvement)")
+                    logger.info(f"{tender_log_prefix} FIELDS: {result.fields_before} → {result.fields_after} ({result.improvement_percentage:.1f}% improvement)")
+                    analysis_logger.info(f"{tender_log_prefix} FIELD COUNT: {result.fields_before} → {result.fields_after} ({result.improvement_percentage:.1f}% improvement)")
                 else:
-                    logger.error(f"[{source_table}:{tender.id}] NORMALIZATION FAILED: {result.error}")
+                    error_msg = f"NORMALIZATION FAILED: {result.error}"
+                    logger.error(f"{tender_log_prefix} {error_msg}")
+                    analysis_logger.error(f"{tender_log_prefix} {error_msg}")
+                    analysis_logger.error(f"{tender_log_prefix} Error type: {type(result.error).__name__}")
+                    
+                    # Log additional context about the failure
+                    if "timeout" in str(result.error).lower():
+                        analysis_logger.error(f"{tender_log_prefix} TIMEOUT ERROR - Consider increasing timeout value or optimizing prompt")
+                    elif "validation" in str(result.error).lower():
+                        analysis_logger.error(f"{tender_log_prefix} VALIDATION ERROR - Check missing required fields")
+                    
+                # Add empty line for readability in logs
+                analysis_logger.info("")
             
             # Add to results
             results_by_source[source_table] = source_results
@@ -1528,6 +1676,39 @@ class TenderNormalizer:
             # Summarize source results
             successful = [r for r in source_results if r.success]
             logger.info(f"==== {source_table} SUMMARY: {len(successful)}/{len(source_results)} successful ====")
+            
+            # Log detailed source stats
+            analysis_logger.info(f"\n{'-'*80}\n{source_table} BATCH ANALYSIS SUMMARY\n{'-'*80}")
+            analysis_logger.info(f"Success rate: {len(successful)}/{len(source_results)} ({(len(successful)/len(source_results)*100):.1f}%)")
+            analysis_logger.info(f"Method breakdown: LLM={source_stats['llm_count']}, Fallback={source_stats['fallback_count']}, Failed={source_stats['failure_count']}")
+            
+            if source_stats["fields_extracted"]:
+                analysis_logger.info("Fields successfully extracted:")
+                for field, count in sorted(source_stats["fields_extracted"].items(), key=lambda x: x[1], reverse=True):
+                    percentage = (count / len(source_results)) * 100
+                    analysis_logger.info(f"  - {field}: {count}/{len(source_results)} ({percentage:.1f}%)")
+            
+            if source_stats["fields_missing"]:
+                analysis_logger.info("Fields missing or empty:")
+                for field, count in sorted(source_stats["fields_missing"].items(), key=lambda x: x[1], reverse=True):
+                    percentage = (count / len(source_results)) * 100
+                    analysis_logger.info(f"  - {field}: {count}/{len(source_results)} ({percentage:.1f}%)")
+            
+            if source_stats["common_errors"]:
+                analysis_logger.info("Common errors:")
+                for error, count in sorted(source_stats["common_errors"].items(), key=lambda x: x[1], reverse=True):
+                    percentage = (count / len(source_results)) * 100
+                    analysis_logger.info(f"  - {error}: {count}/{len(source_results)} ({percentage:.1f}%)")
+            
+            analysis_logger.info(f"{'-'*80}\n")
+        
+        # Log overall summary
+        total_tenders = sum(len(results) for results in results_by_source.values())
+        total_successful = sum(len([r for r in results if r.success]) for results in results_by_source.values())
+        analysis_logger.info(f"OVERALL TEST BATCH SUMMARY:")
+        analysis_logger.info(f"Total tenders processed: {total_tenders}")
+        analysis_logger.info(f"Total successful normalizations: {total_successful} ({(total_successful/total_tenders*100):.1f}%)")
+        analysis_logger.info("===== TEST BATCH ANALYSIS COMPLETE =====\n\n")
         
         return results_by_source
     
