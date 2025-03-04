@@ -246,7 +246,7 @@ class TenderNormalizer:
             )
             
             # Create a run context (will be passed to the agent)
-            context = RunContext(model="mistral", temperature=0.1)
+            context = RunContext(model="mistral")
             
             # Initialize the agent
             try:
@@ -569,6 +569,12 @@ class TenderNormalizer:
                     date_value = tender.source_data.get(date_field)
                 
                 if date_value:
+                    # Skip values like "Unknown", "TBD", etc.
+                    if isinstance(date_value, str) and (
+                        date_value.lower() in ["unknown", "tbd", "to be determined", "n/a", "not available"]
+                    ):
+                        continue
+                        
                     if isinstance(date_value, (datetime, date)):
                         normalized_data[date_field] = date_value
                     elif isinstance(date_value, str):
@@ -590,12 +596,16 @@ class TenderNormalizer:
                             
                             # If none of the formats worked, try ISO format
                             if date_field not in normalized_data:
-                                normalized_data[date_field] = datetime.fromisoformat(
-                                    date_value.replace("Z", "+00:00")
-                                )
+                                try:
+                                    normalized_data[date_field] = datetime.fromisoformat(
+                                        date_value.replace("Z", "+00:00")
+                                    )
+                                except ValueError:
+                                    # Skip if parsing fails
+                                    pass
                         except (ValueError, TypeError):
-                            # Keep as is if parsing fails
-                            normalized_data[date_field] = date_value
+                            # Skip if parsing fails
+                            pass
             
             # Status - convert string to enum
             status_value = getattr(tender, "status", None)
