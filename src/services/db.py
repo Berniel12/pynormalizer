@@ -76,8 +76,8 @@ class SupabaseClient:
             List of unprocessed tenders from all sources
         """
         source_tables = [
-            "sam_gov", "wb", "adb", "ted", "un_tenders", 
-            "dgmarket", "afd_tenders", "iadb"
+            "sam_gov", "wb", "adb", "ted_eu", "ungm", 
+            "afd_tenders", "iadb", "afdb", "aiib"
         ]
         
         all_tenders = []
