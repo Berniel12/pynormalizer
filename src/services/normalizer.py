@@ -659,7 +659,7 @@ class TenderNormalizer:
                     "deadline_date": "response_deadline",
                     "status": "archive_type", 
                     "url": "solicitation_link",
-                    "opportunity_link": "opportunity_link",
+                    "source_id": "opportunity_id",
                 },
                 "wb": {
                     "title": "title",
@@ -679,6 +679,7 @@ class TenderNormalizer:
                     "estimated_value": "contract_value",
                     "currency": "contract_currency",
                     "url": "link",
+                    "source_id": "id",
                 },
                 "adb": {
                     "title": "notice_title",
@@ -694,6 +695,7 @@ class TenderNormalizer:
                     "publication_date": "published_date",
                     "deadline_date": "closing_date",
                     "url": "link",
+                    "source_id": "id",
                 },
                 "ted_eu": {
                     "title": "title",
@@ -713,6 +715,7 @@ class TenderNormalizer:
                     "estimated_value": "value_magnitude",
                     "currency": "value_currency",
                     "url": "notice_url",
+                    "source_id": "id",
                 },
                 "ungm": {
                     "title": "title",
@@ -728,6 +731,7 @@ class TenderNormalizer:
                     "contact_email": "contact_email",
                     "publication_date": "published_date",
                     "url": "link",
+                    "source_id": "id",
                 },
                 "afd_tenders": {
                     "title": "notice_title",
@@ -741,6 +745,7 @@ class TenderNormalizer:
                     "publication_date": "launch_date",
                     "deadline_date": "closure_date",
                     "url": "notice_url",
+                    "source_id": "id",
                 },
                 "iadb": {
                     "title": "notice_title",
@@ -754,6 +759,7 @@ class TenderNormalizer:
                     "publication_date": "published_date",
                     "deadline_date": "deadline_date",
                     "url": "link",
+                    "source_id": "id",
                 },
                 "afdb": {
                     "title": "title",
@@ -768,6 +774,7 @@ class TenderNormalizer:
                     "publication_date": "publication_date",
                     "deadline_date": "deadline_date",
                     "url": "tender_url",
+                    "source_id": "id",
                 },
                 "aiib": {
                     "title": "project_notice",
@@ -781,11 +788,13 @@ class TenderNormalizer:
                     "publication_date": "publication_date",
                     "deadline_date": "deadline",
                     "url": "link",
+                    "source_id": "id",
                 }
             }
             
-            # Define additional URL field names to check
-            url_field_names = [
+            # Define additional URL field names to check - prioritize source-specific URL fields
+            source_url_fields = self._get_url_fields_for_source(tender.source_table)
+            url_field_names = source_url_fields + [
                 "url", "link", "web_link", "notice_url", "opportunity_link", "solicitation_link", 
                 "tender_url", "project_url", "document_url", "listing_url", "external_url"
             ]
@@ -822,8 +831,13 @@ class TenderNormalizer:
                             if value is None and hasattr(tender, "source_data") and tender.source_data:
                                 value = tender.source_data.get(source_field)
                         
-                        if value is not None and str(value).strip():
-                            normalized_data[norm_field] = value
+                        if value is not None:
+                            # For source_id, convert to string
+                            if norm_field == "source_id":
+                                normalized_data[norm_field] = str(value)
+                            # For other fields, only add if not empty
+                            elif str(value).strip():
+                                normalized_data[norm_field] = value
             
             # Then apply direct mappings for any fields not already mapped
             for field in direct_field_mappings:
@@ -834,8 +848,13 @@ class TenderNormalizer:
                     if value is None and hasattr(tender, "source_data") and tender.source_data:
                         value = tender.source_data.get(field)
                     
-                    if value is not None and str(value).strip():
-                        normalized_data[field] = value
+                    if value is not None:
+                        # For source_id, convert to string
+                        if field == "source_id":
+                            normalized_data[field] = str(value)
+                        # For other fields, only add if not empty
+                        elif str(value).strip():
+                            normalized_data[field] = value
             
             # Apply post-processing to improve quality
             if "title" in normalized_data and normalized_data["title"]:
@@ -875,74 +894,66 @@ class TenderNormalizer:
                     if translated_org != normalized_data["organization_name"]:
                         normalized_data["organization_name_english"] = translated_org
             
-            # Handle URL fields - Check all possible URL field names
+            # Handle URL fields - Check all possible URL field names, but prioritize source-specific ones
             url_found = False
-            for url_field in url_field_names:
-                if url_field in normalized_data and normalized_data[url_field]:
-                    # If we already have a primary URL but found another one, add it to document_links
-                    if url_found and url_field != "url":
-                        normalized_data.setdefault("document_links", [])
-                        normalized_data["document_links"].append({"url": normalized_data[url_field]})
-                    else:
-                        # Set as primary URL if we don't have one yet
-                        normalized_data["url"] = normalized_data[url_field]
-                        url_found = True
+            
+            # First check the source-specific primary URL field
+            primary_url_field = source_url_fields[0] if source_url_fields else None
+            
+            if primary_url_field:
+                # Check direct attribute
+                url_value = getattr(tender, primary_url_field, None)
+                if url_value is None and hasattr(tender, "source_data") and tender.source_data:
+                    url_value = tender.source_data.get(primary_url_field)
                 
-                # Also check tender attributes and source_data
-                if not url_found or url_field != "url":
-                    url_value = getattr(tender, url_field, None)
-                    if url_value is None and hasattr(tender, "source_data") and tender.source_data:
-                        url_value = tender.source_data.get(url_field)
-                    
-                    if url_value and str(url_value).strip():
+                if url_value and str(url_value).strip():
+                    normalized_data["url"] = str(url_value).strip()
+                    url_found = True
+                    logger.info(f"Found primary URL from field {primary_url_field}: {url_value}")
+            
+            # If no primary URL found, check other URL fields
+            if not url_found:
+                for url_field in url_field_names:
+                    if url_field in normalized_data and normalized_data[url_field]:
+                        # If we already have a primary URL but found another one, add it to document_links
                         if url_found and url_field != "url":
                             normalized_data.setdefault("document_links", [])
-                            normalized_data["document_links"].append({"url": url_value})
+                            normalized_data["document_links"].append({"url": normalized_data[url_field]})
                         else:
-                            normalized_data["url"] = url_value
+                            # Set as primary URL if we don't have one yet
+                            normalized_data["url"] = normalized_data[url_field]
                             url_found = True
+                    
+                    # Also check tender attributes and source_data
+                    if not url_found or url_field != "url":
+                        url_value = getattr(tender, url_field, None)
+                        if url_value is None and hasattr(tender, "source_data") and tender.source_data:
+                            url_value = tender.source_data.get(url_field)
+                        
+                        if url_value and str(url_value).strip():
+                            if url_found and url_field != "url":
+                                normalized_data.setdefault("document_links", [])
+                                normalized_data["document_links"].append({"url": url_value})
+                            else:
+                                normalized_data["url"] = url_value
+                                url_found = True
             
-            # Extract URLs from description and other text fields if not already found
+            # Extract URLs from description and other text fields only as a fallback
             if not url_found and "description" in normalized_data and normalized_data["description"]:
                 urls = extract_urls_from_text(normalized_data["description"])
                 if urls:
                     normalized_data["url"] = urls[0]  # Use the first URL
                     url_found = True
+                    logger.info(f"Extracted URL from description: {urls[0]}")
                     
                     if len(urls) > 1:
                         normalized_data.setdefault("document_links", [])
                         for url in urls[1:]:
                             normalized_data["document_links"].append({"url": url})
             
-            # If we still don't have a URL, check all string fields
+            # Log if no URL was found
             if not url_found:
-                for field_name, field_value in tender_dict.items():
-                    if isinstance(field_value, str) and field_name not in ["id", "source_id"]:
-                        urls = extract_urls_from_text(field_value)
-                        if urls:
-                            normalized_data["url"] = urls[0]
-                            url_found = True
-                            
-                            if len(urls) > 1:
-                                normalized_data.setdefault("document_links", [])
-                                for url in urls[1:]:
-                                    normalized_data["document_links"].append({"url": url})
-                            break
-                            
-                # Check nested source_data too
-                if not url_found and hasattr(tender, "source_data") and tender.source_data:
-                    for field_name, field_value in tender.source_data.items():
-                        if isinstance(field_value, str) and field_name not in ["id", "source_id"]:
-                            urls = extract_urls_from_text(field_value)
-                            if urls:
-                                normalized_data["url"] = urls[0]
-                                url_found = True
-                                
-                                if len(urls) > 1:
-                                    normalized_data.setdefault("document_links", [])
-                                    for url in urls[1:]:
-                                        normalized_data["document_links"].append({"url": url})
-                                break
+                logger.warning(f"No URL found for tender {tender.id} from {tender.source_table}")
             
             # Handle document links
             documents = []
@@ -999,6 +1010,7 @@ class TenderNormalizer:
                 if emails:
                     contact_info["email"] = emails[0]
                     normalized_data["contact_email"] = emails[0]
+                    logger.info(f"Extracted email from description: {emails[0]}")
             
             # If we have any contact info, add it in both formats
             if contact_info:
@@ -1415,6 +1427,106 @@ class TenderNormalizer:
             self.log_performance_stats()
         
         return processed_results
+
+    async def normalize_test_batch(self, tenders_by_source: Dict[str, List[RawTender]]) -> Dict[str, List[NormalizationResult]]:
+        """
+        Normalize a test batch of tenders with extensive logging for quality improvement.
+        
+        This function processes a small number of tenders from each source table
+        with detailed logging to help identify and fix normalization issues.
+        
+        Args:
+            tenders_by_source: Dictionary mapping source tables to lists of tenders
+            
+        Returns:
+            Dictionary mapping source tables to lists of normalization results
+        """
+        results_by_source = {}
+        
+        for source_table, tenders in tenders_by_source.items():
+            logger.info(f"==== PROCESSING TEST BATCH FOR {source_table} ====")
+            logger.info(f"Test batch contains {len(tenders)} tenders")
+            
+            # Process each tender individually for detailed logging
+            source_results = []
+            for i, tender in enumerate(tenders):
+                logger.info(f"[{source_table}] Processing test tender {i+1}/{len(tenders)}: {tender.id}")
+                
+                # Log raw tender data
+                logger.info(f"[{source_table}:{tender.id}] RAW TENDER DATA:")
+                tender_dict = tender.model_dump()
+                
+                # Log source-specific URL fields
+                url_fields = self._get_url_fields_for_source(source_table)
+                url_values = {}
+                for field in url_fields:
+                    if field in tender_dict:
+                        url_values[field] = tender_dict[field]
+                    elif hasattr(tender, "source_data") and tender.source_data and field in tender.source_data:
+                        url_values[field] = tender.source_data[field]
+                
+                if url_values:
+                    logger.info(f"[{source_table}:{tender.id}] URL FIELDS: {url_values}")
+                else:
+                    logger.info(f"[{source_table}:{tender.id}] NO URL FIELDS FOUND")
+                
+                # Normalize the tender
+                result = await self.normalize_tender(tender)
+                source_results.append(result)
+                
+                # Log result
+                if result.success and result.normalized_tender:
+                    logger.info(f"[{source_table}:{tender.id}] NORMALIZATION SUCCESSFUL ({result.method_used})")
+                    
+                    # Log URL extraction results
+                    normalized_data = result.normalized_tender.model_dump()
+                    if "url" in normalized_data and normalized_data["url"]:
+                        logger.info(f"[{source_table}:{tender.id}] EXTRACTED URL: {normalized_data['url']}")
+                    else:
+                        logger.info(f"[{source_table}:{tender.id}] NO URL EXTRACTED")
+                    
+                    # Log contact extraction results
+                    contact_fields = ["contact_name", "contact_email", "contact_phone", "contact_address"]
+                    extracted_contacts = {f: normalized_data.get(f) for f in contact_fields if f in normalized_data and normalized_data.get(f)}
+                    if extracted_contacts:
+                        logger.info(f"[{source_table}:{tender.id}] EXTRACTED CONTACTS: {extracted_contacts}")
+                    else:
+                        logger.info(f"[{source_table}:{tender.id}] NO CONTACTS EXTRACTED")
+                    
+                    # Log field counts
+                    logger.info(f"[{source_table}:{tender.id}] FIELDS: {result.fields_before} → {result.fields_after} ({result.improvement_percentage:.1f}% improvement)")
+                else:
+                    logger.error(f"[{source_table}:{tender.id}] NORMALIZATION FAILED: {result.error}")
+            
+            # Add to results
+            results_by_source[source_table] = source_results
+            
+            # Summarize source results
+            successful = [r for r in source_results if r.success]
+            logger.info(f"==== {source_table} SUMMARY: {len(successful)}/{len(source_results)} successful ====")
+        
+        return results_by_source
+    
+    def _get_url_fields_for_source(self, source_table: str) -> List[str]:
+        """Get URL field names for a specific source table."""
+        # Base URL fields to check in all sources
+        base_fields = ["url", "link", "web_link"]
+        
+        # Source-specific URL fields
+        source_fields = {
+            "sam_gov": ["solicitation_link", "opportunity_link"],
+            "wb": ["link"],
+            "adb": ["link"],
+            "ted_eu": ["notice_url"],
+            "ungm": ["link"],
+            "afd_tenders": ["notice_url"],
+            "iadb": ["link"],
+            "afdb": ["tender_url"],
+            "aiib": ["link"]
+        }
+        
+        # Combine base fields with source-specific fields
+        return base_fields + source_fields.get(source_table, [])
 
 
 # Create a singleton instance

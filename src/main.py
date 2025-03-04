@@ -156,9 +156,76 @@ async def process_all_sources(
     return results_by_source
 
 
+async def process_test_batch(limit_per_source: int = 3) -> Dict[str, List[NormalizationResult]]:
+    """
+    Process a test batch of 3 tenders from each source table with extensive logging.
+    
+    This function is used to test and improve the normalization process by
+    processing a small number of tenders from each source table and analyzing
+    the results with detailed logging.
+    
+    Args:
+        limit_per_source: Number of tenders to process from each source (default: 3)
+        
+    Returns:
+        Dictionary mapping source tables to normalization results
+    """
+    logger.info(f"Processing test batch of {limit_per_source} tenders from each source")
+    
+    # Source tables to process
+    source_tables = [
+        "sam_gov", "wb", "adb", "ted_eu", "ungm", 
+        "afd_tenders", "iadb", "afdb", "aiib"
+    ]
+    
+    # Get tenders for each source
+    tenders_by_source = {}
+    total_tenders = 0
+    
+    for source in source_tables:
+        try:
+            tenders = await supabase.get_unprocessed_tenders(source, limit_per_source)
+            if tenders:
+                tenders_by_source[source] = tenders
+                total_tenders += len(tenders)
+                logger.info(f"Found {len(tenders)} tenders for test batch from {source}")
+            else:
+                logger.warning(f"No unprocessed tenders found for test batch from {source}")
+        except Exception as e:
+            logger.error(f"Error retrieving tenders from {source}: {str(e)}")
+    
+    if not total_tenders:
+        logger.warning("No tenders found for test batch")
+        return {}
+    
+    logger.info(f"Processing test batch with total of {total_tenders} tenders from {len(tenders_by_source)} sources")
+    
+    # Process test batch with special logging
+    results = await normalizer.normalize_test_batch(tenders_by_source)
+    
+    # Mark tenders as processed
+    for source, source_results in results.items():
+        successful = [r for r in source_results if r.success and r.normalized_tender]
+        
+        for result in successful:
+            if result.normalized_tender:
+                try:
+                    saved = await supabase.save_normalized_tender(result.normalized_tender)
+                    if not saved:
+                        logger.error(f"Failed to save test tender {result.tender_id} to database")
+                except Exception as e:
+                    logger.error(f"Error saving test tender {result.tender_id}: {str(e)}")
+    
+    # Print performance stats
+    normalizer.log_performance_stats()
+    
+    return results
+
+
 def process_all_tenders(
     limit_per_source: int = 25,
     source_name: Optional[str] = None,
+    test_mode: bool = False,
 ) -> Dict[str, List[NormalizationResult]]:
     """
     Synchronous wrapper for processing tenders.
@@ -166,11 +233,15 @@ def process_all_tenders(
     Args:
         limit_per_source: Maximum number of tenders to process per source
         source_name: Optional source table name to process just one source
+        test_mode: Whether to run in test mode with extensive logging
         
     Returns:
         Dictionary mapping source tables to normalization results
     """
-    if source_name:
+    if test_mode:
+        # Process a small test batch with extensive logging
+        return asyncio.run(process_test_batch(limit_per_source))
+    elif source_name:
         # Process only the specified source
         return {source_name: asyncio.run(process_source(source_name, limit_per_source))}
     else:
@@ -209,9 +280,13 @@ def main() -> None:
     apify_input = get_apify_input()
     source_name = apify_input.get("sourceName")
     limit = int(apify_input.get("limit", settings.batch_size))
+    test_mode = apify_input.get("testMode", False)
     
     # Process tenders
-    if source_name:
+    if test_mode:
+        logger.info(f"Running in TEST MODE with {limit} tenders per source")
+        results = process_all_tenders(limit, None, test_mode=True)
+    elif source_name:
         logger.info(f"Processing source: {source_name} with limit: {limit}")
         results = process_all_tenders(limit, source_name)
     else:
