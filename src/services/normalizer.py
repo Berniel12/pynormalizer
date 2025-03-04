@@ -317,10 +317,12 @@ class TenderNormalizer:
             elif settings.openai_api_key.get_secret_value():
                 os.environ["OPENAI_API_KEY"] = settings.openai_api_key.get_secret_value()
                 
-        # Set up the agent for normalization
+        # Set up the agent for normalization with system_prompt
+        # For pydantic-ai 0.0.31, the system_prompt needs to be passed at initialization
         self.agent = Agent(
             model=settings.openai_model,
             result_type=NormalizationOutput,
+            system_prompt=self._get_system_prompt(),
         )
         
         # Performance tracking
@@ -461,191 +463,81 @@ class TenderNormalizer:
             # Add debugging output to trace the issue
             logger.debug(f"Input data for LLM: {input_data.model_dump_json(indent=2)}")
             
-            # Create a run context (will be passed to the agent)
-            context = None
-            try:
-                # For pydantic-ai version 0.0.31
-                logger.debug("Creating RunContext with version 0.0.31 signature")
-                context = RunContext(
-                    deps={},  # Empty dependencies dictionary
-                    model=settings.openai_model,  # Use model name from settings
-                    usage={},  # Empty usage tracking dictionary
-                    prompt=self._get_system_prompt()  # System prompt
-                )
-                logger.debug(f"RunContext created successfully: {context}")
-            except Exception as e:
-                logger.error(f"Failed to create RunContext: {str(e)}")
+            # For pydantic-ai version 0.0.31, we DON'T pass context or system_prompt to run()
+            # Instead, we set system_prompt when creating the Agent instance
+            # The agent was already initialized in __init__ with the correct settings
             
-            # Run the normalization
-            result = None
-            if context is not None:
-                try:
-                    # Try with context parameter and tracing for debugging
-                    logger.debug("Attempting agent.run with context parameter")
-                    result = await self.agent.run(input_data, context=context)
-                    logger.debug(f"Agent run successful with context: {type(result)}")
-                except TypeError as e:
-                    # If that fails, try with the context as system_prompt
-                    logger.error(f"TypeError when running agent with context: {str(e)}")
-                    try:
-                        logger.debug("Attempting agent.run with system_prompt parameter")
-                        result = await self.agent.run(input_data, system_prompt=self._get_system_prompt())
-                        logger.debug(f"Agent run successful with system_prompt: {type(result)}")
-                    except TypeError as e2:
-                        # Last resort, try without context parameter
-                        logger.error(f"TypeError when running agent with system_prompt: {str(e2)}")
-                        logger.debug("Attempting agent.run without extra parameters")
-                        result = await self.agent.run(input_data)
-                        logger.debug(f"Agent run successful without parameters: {type(result)}")
-                except Exception as e:
-                    # Catch any other exceptions
-                    logger.error(f"Unexpected error in agent.run: {str(e)}")
-                    raise
-            else:
-                # No context could be created, try running without it
-                logger.warning("Running agent without context due to previous errors")
+            logger.debug("Running agent with input_data only (pydantic-ai 0.0.31 API)")
+            try:
+                # In pydantic-ai 0.0.31, agent.run() just takes the input data
                 result = await self.agent.run(input_data)
-                logger.debug(f"Agent run successful without context: {type(result)}")
-            
-            # Check if we got a result back
-            if result is None:
-                raise ValueError("Agent returned None result")
+                logger.debug(f"Agent run successful: {type(result)}")
                 
-            # Validate the result
-            output = None
-            try:
-                output = NormalizationOutput.model_validate(result)
-                logger.debug("Successfully validated output model")
-            except ValidationError as e:
-                logger.error(f"Validation error in output: {str(e)}")
-                raise
-            
-            # Save performance data
-            processing_time = time.time() - start_time
-            processing_time_ms = int(processing_time * 1000)
-            
-            # Ensure required fields and correct types
-            tender_data = output.tender
-            # Add fields that might be missing
-            tender_data["id"] = tender.id
-            tender_data["source_table"] = tender.source_table
-            tender_data["normalized_by"] = "LLM-Mistral"
-            tender_data["normalized_method"] = "llm"
-            tender_data["normalized_at"] = datetime.utcnow().isoformat()
-            tender_data["processing_time_ms"] = processing_time_ms
-            
-            # Apply post-processing to improve quality
-            if "title" in tender_data and tender_data["title"]:
-                tender_data["title"] = format_title(tender_data["title"])
-            
-            # Extract URLs from description and other text fields if not already found
-            if "url" not in tender_data or not tender_data["url"]:
-                # Check description field for URLs
-                if "description" in tender_data and tender_data["description"]:
-                    urls = extract_urls_from_text(tender_data["description"])
-                    if urls:
-                        tender_data["url"] = urls[0]  # Use the first URL
-                        if len(urls) > 1:
-                            tender_data.setdefault("document_links", [])
-                            for url in urls[1:]:
-                                tender_data["document_links"].append({"url": url})
+                # Validate the output to ensure it matches our expected schema
+                if not isinstance(result, NormalizationOutput):
+                    logger.error(f"Expected NormalizationOutput but got {type(result)}")
+                    return await self._normalize_with_fallback(
+                        tender, f"LLM returned incorrect type: {type(result)}", start_time
+                    )
                 
-                # Check all fields for URLs if we still don't have one
-                if "url" not in tender_data or not tender_data["url"]:
-                    for field_name, field_value in tender_dict.items():
-                        if isinstance(field_value, str) and field_name not in ["id", "source_id"]:
-                            urls = extract_urls_from_text(field_value)
-                            if urls:
-                                tender_data["url"] = urls[0]
-                                break
-            
-            # Extract contact information from description if not already found
-            has_contact_info = "contact_name" in tender_data or "contact_email" in tender_data or "contact_phone" in tender_data
-            if not has_contact_info and "description" in tender_data and tender_data["description"]:
-                emails = extract_emails_from_text(tender_data["description"])
-                if emails:
-                    tender_data["contact_email"] = emails[0]
-            
-            # Handle language detection and translation
-            language = None
-            
-            # Detect language from title and description
-            if "title" in tender_data and tender_data["title"]:
-                language = detect_language(tender_data["title"])
-                tender_data["language"] = language
+                logger.debug(f"LLM normalization output: {result.model_dump_json(indent=2)}")
                 
-                # Translate title if not in English
-                if language != "en":
-                    translated_title = translate_to_english(tender_data["title"], language)
-                    if translated_title != tender_data["title"]:
-                        tender_data["title_english"] = translated_title
-            
-            # Translate description if not in English
-            if "description" in tender_data and tender_data["description"]:
-                desc_language = detect_language(tender_data["description"])
-                if not language:
-                    language = desc_language
-                    tender_data["language"] = language
+                # Rest of processing
+                normalized_data = result.tender
+                missing_fields = result.missing_fields
+                notes = result.notes
+
+                # Essential fields check and fallback if needed
+                self._ensure_critical_fields(normalized_data, tender)
                 
-                if desc_language != "en":
-                    translated_desc = translate_to_english(tender_data["description"], desc_language)
-                    if translated_desc != tender_data["description"]:
-                        tender_data["description_english"] = translated_desc
-            
-            # Organization name translation if needed
-            if "organization_name" in tender_data and tender_data["organization_name"]:
-                org_language = detect_language(tender_data["organization_name"])
-                if org_language != "en":
-                    translated_org = translate_to_english(tender_data["organization_name"], org_language)
-                    if translated_org != tender_data["organization_name"]:
-                        tender_data["organization_name_english"] = translated_org
-            
-            # Handle dates
-            self._infer_status_from_dates(tender_data)
-            
-            # Ensure all critical fields are present
-            self._ensure_critical_fields(tender_data, tender)
-            
-            # Log quality check data
-            log_quality_check(tender.id, tender.source_table, tender_dict, tender_data)
-            
-            # Create the normalized tender
-            normalized_tender = NormalizedTender.model_validate(tender_data)
-            
-            # Calculate fields and improvement
-            fields_after = self._count_non_empty_fields(normalized_tender.model_dump())
-            improvement = (
-                ((fields_after - fields_before) / fields_before) * 100
-                if fields_before > 0
-                else 0
-            )
-            
-            # Update stats
-            result = NormalizationResult(
-                tender_id=tender.id,
-                source_table=tender.source_table,
-                success=True,
-                normalized_tender=normalized_tender,
-                error=None,
-                processing_time=processing_time,
-                method_used="llm",
-                fields_before=fields_before,
-                fields_after=fields_after,
-                improvement_percentage=improvement,
-            )
-            
-            self._update_performance_stats(result)
-            return result
-            
+                # Add URL from raw data if available
+                if url_fields := self._get_url_fields_for_source(tender.source_table):
+                    for field_name in url_fields:
+                        if field_value := getattr(tender, field_name, None):
+                            normalized_data["url"] = field_value
+                            logger.info(f"Found primary URL from field {field_name}: {field_value}")
+                            break
+                
+                # Standardize tender type
+                self._map_standard_tender_type(normalized_data, tender)
+                
+                # Ensure valid status
+                self._ensure_valid_status(normalized_data)
+                
+                # Parse dates to standard format
+                if "publication_date" in normalized_data and normalized_data["publication_date"]:
+                    normalized_data["publication_date"] = self._parse_date(
+                        normalized_data["publication_date"]
+                    )
+                if "deadline_date" in normalized_data and normalized_data["deadline_date"]:
+                    normalized_data["deadline_date"] = self._parse_date(
+                        normalized_data["deadline_date"]
+                    )
+                
+                # Infer status from dates if not set
+                self._infer_status_from_dates(normalized_data)
+                
+                fields_after = self._count_non_empty_fields(normalized_data)
+                
+                dur = time.time() - start_time
+                return NormalizationResult(
+                    tender=tender,
+                    normalized_data=normalized_data,
+                    method="llm",
+                    fields_before=fields_before,
+                    fields_after=fields_after,
+                    success=True,
+                    error=None,
+                    duration=dur,
+                    missing_fields=missing_fields,
+                    notes=notes,
+                )
+            except Exception as e:
+                logger.error(f"LLM normalization failed for {tender.id} from {tender.source_table}: {str(e)}")
+                return await self._normalize_with_fallback(tender, str(e), start_time)
         except Exception as e:
-            logger.error(
-                f"LLM normalization failed for {tender.id} from {tender.source_table}: {str(e)}"
-            )
-            
-            # Fallback to direct parsing if LLM fails
-            return await self._normalize_with_fallback(
-                tender, f"LLM normalization failed: {str(e)}", start_time
-            )
+            logger.error(f"Error during LLM normalization setup: {str(e)}")
+            return await self._normalize_with_fallback(tender, str(e), start_time)
 
     async def _normalize_with_fallback(
         self, tender: RawTender, error: str = "Fallback used", start_time: Optional[float] = None
