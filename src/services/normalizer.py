@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Optional, TypeVar, Union
 from langdetect import detect
 from pydantic import BaseModel, Field, ValidationError
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.exceptions import AgentError
 
 from ..config import normalizer_config, settings
 from ..models.tender import (
@@ -197,7 +196,7 @@ class TenderNormalizer:
                 improvement_percentage=improvement,
             )
             
-        except (AgentError, ValidationError, Exception) as e:
+        except (Exception) as e:
             # Fall back to rule-based normalization
             logger.warning(
                 f"LLM normalization failed for {tender.id} from {tender.source_table}: {str(e)}"
