@@ -445,6 +445,9 @@ class TenderNormalizer:
                 source_table=tender.source_table,
             )
             
+            # Add debugging output to trace the issue
+            logger.debug(f"Input data for LLM: {input_data.model_dump_json(indent=2)}")
+            
             # Create a run context (will be passed to the agent)
             context = None
             try:
@@ -456,30 +459,53 @@ class TenderNormalizer:
                     usage={},  # Empty usage tracking dictionary
                     prompt=self._get_system_prompt()  # System prompt
                 )
+                logger.debug(f"RunContext created successfully: {context}")
             except Exception as e:
                 logger.error(f"Failed to create RunContext: {str(e)}")
             
             # Run the normalization
+            result = None
             if context is not None:
                 try:
-                    # First try with context
+                    # Try with context parameter and tracing for debugging
                     logger.debug("Attempting agent.run with context parameter")
                     result = await self.agent.run(input_data, context=context)
-                except TypeError:
+                    logger.debug(f"Agent run successful with context: {type(result)}")
+                except TypeError as e:
                     # If that fails, try with the context as system_prompt
+                    logger.error(f"TypeError when running agent with context: {str(e)}")
                     try:
                         logger.debug("Attempting agent.run with system_prompt parameter")
                         result = await self.agent.run(input_data, system_prompt=self._get_system_prompt())
-                    except TypeError:
+                        logger.debug(f"Agent run successful with system_prompt: {type(result)}")
+                    except TypeError as e2:
                         # Last resort, try without context parameter
+                        logger.error(f"TypeError when running agent with system_prompt: {str(e2)}")
                         logger.debug("Attempting agent.run without extra parameters")
                         result = await self.agent.run(input_data)
+                        logger.debug(f"Agent run successful without parameters: {type(result)}")
+                except Exception as e:
+                    # Catch any other exceptions
+                    logger.error(f"Unexpected error in agent.run: {str(e)}")
+                    raise
             else:
                 # No context could be created, try running without it
                 logger.warning("Running agent without context due to previous errors")
                 result = await self.agent.run(input_data)
+                logger.debug(f"Agent run successful without context: {type(result)}")
             
-            output = NormalizationOutput.model_validate(result)
+            # Check if we got a result back
+            if result is None:
+                raise ValueError("Agent returned None result")
+                
+            # Validate the result
+            output = None
+            try:
+                output = NormalizationOutput.model_validate(result)
+                logger.debug("Successfully validated output model")
+            except ValidationError as e:
+                logger.error(f"Validation error in output: {str(e)}")
+                raise
             
             # Save performance data
             processing_time = time.time() - start_time
