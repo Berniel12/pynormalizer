@@ -454,34 +454,59 @@ class TenderNormalizer:
             )
             
             # Create a run context (will be passed to the agent)
+            context = None
             try:
-                # Try newer pydantic-ai API
-                context = RunContext(model="mistral")
-            except TypeError:
-                # Try older pydantic-ai API
+                # Try the version that should be installed in Docker (0.0.31)
+                logger.debug("Trying to create RunContext with version 0.0.31 signature")
+                context = RunContext(
+                    system_prompt=self._get_system_prompt(),
+                    model=settings.openai_model,
+                    provider="openai"
+                )
+            except (TypeError, ValueError) as e:
+                logger.warning(f"Error creating RunContext with system_prompt/model/provider: {str(e)}")
                 try:
-                    context = RunContext(
-                        deps={},
-                        model="mistral",
-                        usage={},
-                        prompt=self._get_system_prompt()
-                    )
-                except Exception as e:
-                    logger.warning(f"Error creating RunContext with deps/model/usage/prompt: {str(e)}")
-                    # Last resort fallback
+                    # Try newer pydantic-ai API
+                    logger.debug("Trying to create RunContext with newer API")
+                    context = RunContext(model="mistral")
+                except TypeError:
+                    # Try older pydantic-ai API
                     try:
-                        context = RunContext()
+                        logger.debug("Trying to create RunContext with older API")
+                        context = RunContext(
+                            deps={},
+                            model="mistral", 
+                            usage={},
+                            prompt=self._get_system_prompt()
+                        )
                     except Exception as e:
-                        logger.warning(f"Error creating basic RunContext: {str(e)}")
-                        context = None
+                        logger.warning(f"Error creating RunContext with deps/model/usage/prompt: {str(e)}")
+                        # Last resort fallback
+                        try:
+                            logger.debug("Trying to create basic RunContext")
+                            context = RunContext()
+                        except Exception as e:
+                            logger.error(f"All attempts to create RunContext failed: {str(e)}")
             
             # Run the normalization
             if context is not None:
                 try:
+                    # First try with context
+                    logger.debug("Attempting agent.run with context parameter")
                     result = await self.agent.run(input_data, context=context)
                 except TypeError:
-                    # Try older API without context parameter
-                    result = await self.agent.run(input_data)
+                    # If that fails, try with the context as system_prompt
+                    try:
+                        logger.debug("Attempting agent.run with system_prompt parameter")
+                        result = await self.agent.run(input_data, system_prompt=self._get_system_prompt())
+                    except TypeError:
+                        # Last resort, try without context parameter
+                        logger.debug("Attempting agent.run without extra parameters")
+                        result = await self.agent.run(input_data)
+            else:
+                # No context could be created, try running without it
+                logger.warning("Running agent without context due to previous errors")
+                result = await self.agent.run(input_data)
             
             output = NormalizationOutput.model_validate(result)
             
@@ -1467,6 +1492,25 @@ class TenderNormalizer:
         """
         results_by_source = {}
         
+        # First, log some debug info about what we received
+        logger.info(f"Received test batch with {len(tenders_by_source)} sources")
+        for source, tenders in tenders_by_source.items():
+            logger.info(f"Source {source}: {len(tenders)} tenders")
+            
+            # Skip empty tender lists
+            if not tenders:
+                logger.warning(f"No tenders to process for source {source}, skipping")
+                results_by_source[source] = []
+                continue
+                
+            # Check for null critical fields
+            null_title_count = sum(1 for t in tenders if t.title is None)
+            null_desc_count = sum(1 for t in tenders if t.description is None)
+            null_country_count = sum(1 for t in tenders if t.country is None)
+            
+            if null_title_count > 0 or null_desc_count > 0 or null_country_count > 0:
+                logger.warning(f"Source {source} has tenders with null fields: title({null_title_count}), description({null_desc_count}), country({null_country_count})")
+                
         # Set up a dedicated analysis log file compatible with Apify
         analysis_log_path = "normalization_analysis.log"
         import logging

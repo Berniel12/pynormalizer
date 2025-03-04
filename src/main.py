@@ -255,13 +255,36 @@ def get_apify_input() -> dict:
     
     # Check if we're running on Apify
     if os.environ.get("APIFY_IS_AT_HOME"):
-        # Try to load input from the default location
         try:
-            with open(os.environ.get("APIFY_INPUT_KEY", "INPUT"), encoding="utf-8") as f:
-                apify_input = json.load(f)
-                logger.info(f"Loaded Apify input: {apify_input}")
+            # Try new Apify SDK first
+            try:
+                from apify import Actor
+                logger.info("Using Apify SDK to get input")
+                asyncio.run(Actor.init())
+                apify_input = Actor.get_input() or {}
+                logger.info(f"Loaded Apify input via SDK: {apify_input}")
+            except (ImportError, Exception) as e:
+                logger.warning(f"Failed to load input via Apify SDK: {str(e)}")
+                
+                # Fall back to reading the input file directly
+                input_path = os.environ.get("APIFY_INPUT_KEY", "INPUT")
+                if os.path.exists(input_path):
+                    with open(input_path, encoding="utf-8") as f:
+                        apify_input = json.load(f)
+                        logger.info(f"Loaded Apify input from file: {apify_input}")
+                else:
+                    # Try loading from default locations
+                    for possible_path in ["INPUT", "/input/INPUT", "./input/INPUT", "./INPUT"]:
+                        if os.path.exists(possible_path):
+                            with open(possible_path, encoding="utf-8") as f:
+                                apify_input = json.load(f)
+                                logger.info(f"Loaded Apify input from {possible_path}: {apify_input}")
+                                break
         except Exception as e:
             logger.warning(f"Failed to load Apify input: {str(e)}")
+            # Set default test mode for Apify to ensure we don't process too many tenders
+            logger.info("Defaulting to test mode with 3 tenders per source")
+            apify_input = {"testMode": True, "limit": 3}
     
     return apify_input
 
