@@ -132,7 +132,7 @@ class NormalizedTender(BaseModel):
     # Identifier and source information
     id: str = Field(..., description="Unique identifier for the tender")
     source_table: str = Field(..., description="Source table name")
-    source_id: Optional[str] = Field(None, description="Original ID from the source")
+    source_id: str = Field(..., description="Original ID from the source")
     
     # Core tender information
     title: str = Field(..., description="Title of the tender")
@@ -145,18 +145,19 @@ class NormalizedTender(BaseModel):
     # Location information
     country: str = Field(..., description="Country where the tender is located")
     country_code: Optional[str] = Field(None, description="ISO country code")
+    city: Optional[str] = Field(None, description="City where the tender is located")
     location: Optional[str] = Field(None, description="Specific location within the country")
     
-    # Organization
+    # Organization and buyer information
     organization_name: Optional[str] = Field(None, description="Name of the issuing organization")
     organization_id: Optional[str] = Field(None, description="ID of the issuing organization")
+    buyer: Optional[str] = Field(None, description="Entity making the purchase")
     
-    # Multi-language fields
-    title_english: Optional[str] = Field(None, description="English version of the title")
-    description_english: Optional[str] = Field(None, description="English version of the description")
-    organization_name_english: Optional[str] = Field(
-        None, description="English version of the organization name"
-    )
+    # Project information
+    project_name: Optional[str] = Field(None, description="Name of the project")
+    project_id: Optional[str] = Field(None, description="ID of the project")
+    project_number: Optional[str] = Field(None, description="Reference number for the project")
+    sector: Optional[str] = Field(None, description="Business/industry sector")
     
     # Classification
     status: TenderStatus = Field(
@@ -165,26 +166,55 @@ class NormalizedTender(BaseModel):
     tender_type: TenderType = Field(
         default=TenderType.UNKNOWN, description="Type of the tender"
     )
+    procurement_method: Optional[str] = Field(None, description="Method used for procurement")
+    
+    # Reference information
+    notice_id: Optional[str] = Field(None, description="ID of the specific notice")
+    reference_number: Optional[str] = Field(None, description="Reference number for the tender")
     
     # Financial information
     value: Optional[float] = Field(None, description="Value of the tender")
     currency: Optional[str] = Field(None, description="Currency of the tender value")
+    estimated_value: Optional[float] = Field(None, description="Estimated value of the tender")
     
     # URL and documents
     url: Optional[HttpUrl] = Field(None, description="Main URL of the tender")
     documents: Optional[List[DocumentLink]] = Field(
         default_factory=list, description="Associated documents"
     )
+    document_links: Optional[List[Dict[str, Any]]] = Field(
+        default_factory=list, description="Links to documents in JSON format"
+    )
     
     # Contact information
     contact: Optional[ContactInfo] = Field(None, description="Contact information")
+    contact_name: Optional[str] = Field(None, description="Name of the contact person")
+    contact_email: Optional[str] = Field(None, description="Email for inquiries")
+    contact_phone: Optional[str] = Field(None, description="Phone number for inquiries")
+    contact_address: Optional[str] = Field(None, description="Physical contact address")
     
     # Language information
     language: Optional[str] = Field(None, description="Original language of the tender")
     
+    # Multi-language fields
+    title_english: Optional[str] = Field(None, description="English version of the title")
+    description_english: Optional[str] = Field(None, description="English version of the description")
+    organization_name_english: Optional[str] = Field(
+        None, description="English version of the organization name"
+    )
+    buyer_english: Optional[str] = Field(None, description="English version of the buyer name")
+    project_name_english: Optional[str] = Field(None, description="English version of the project name")
+    
+    # Original data
+    source_data: Optional[Dict[str, Any]] = Field(None, description="Original source data")
+    original_data: Optional[Dict[str, Any]] = Field(None, description="Original data in JSON format")
+    
     # Normalization metadata
     normalized_at: datetime = Field(default_factory=datetime.utcnow)
     normalized_by: str = Field(default="pydantic-llm")
+    normalized_method: Optional[str] = Field(None, description="Method used for normalization")
+    fallback_reason: Optional[str] = Field(None, description="Reason for using fallback")
+    processing_time_ms: Optional[int] = Field(None, description="Processing time in milliseconds")
     
     # Validation to ensure critical fields are present
     @model_validator(mode="after")

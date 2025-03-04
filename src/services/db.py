@@ -4,6 +4,7 @@ Database service for connecting to Supabase.
 import logging
 from typing import Any, Dict, List, Optional
 import uuid
+from datetime import datetime
 
 import asyncpg
 from supabase import Client, create_client
@@ -112,7 +113,7 @@ class SupabaseClient:
 
     async def save_normalized_tender(self, tender: NormalizedTender) -> bool:
         """
-        Save a normalized tender to the normalized_tenders table.
+        Save a normalized tender to the unified_tenders table.
         
         Args:
             tender: The normalized tender to save
@@ -126,25 +127,76 @@ class SupabaseClient:
             # Convert Pydantic model to dict
             tender_dict = tender.model_dump(mode="json")
             
-            # Insert into normalized_tenders table
-            response = client.table("normalized_tenders").insert(tender_dict).execute()
+            # Map fields to unified_tenders schema
+            unified_tender = {
+                # Required fields
+                "title": tender_dict.get("title"),
+                "source_table": tender_dict.get("source_table"),
+                "source_id": tender_dict.get("source_id") or tender_dict.get("id"),
+                
+                # Optional fields with direct mapping
+                "description": tender_dict.get("description"),
+                "tender_type": tender_dict.get("tender_type"),
+                "status": tender_dict.get("status"),
+                "publication_date": tender_dict.get("publication_date"),
+                "deadline_date": tender_dict.get("deadline_date"),
+                "country": tender_dict.get("country"),
+                "city": tender_dict.get("location"),  # Map location to city
+                "organization_name": tender_dict.get("organization_name"),
+                "organization_id": tender_dict.get("organization_id"),
+                "url": tender_dict.get("url"),
+                "language": tender_dict.get("language"),
+                
+                # English translation fields
+                "title_english": tender_dict.get("title_english"),
+                "description_english": tender_dict.get("description_english"),
+                "organization_name_english": tender_dict.get("organization_name_english"),
+                
+                # Processing metadata
+                "normalized_at": tender_dict.get("normalized_at"),
+                "normalized_by": tender_dict.get("normalized_by"),
+                "processed_at": datetime.utcnow().isoformat(),
+                
+                # Original data for reference
+                "original_data": tender_dict.get("source_data"),
+            }
+            
+            # Handle contact information if present
+            if tender_dict.get("contact"):
+                contact = tender_dict["contact"]
+                unified_tender["contact_name"] = contact.get("name")
+                unified_tender["contact_email"] = contact.get("email")
+                unified_tender["contact_phone"] = contact.get("phone")
+                unified_tender["contact_address"] = contact.get("address")
+            
+            # Handle document links if present
+            if tender_dict.get("documents"):
+                unified_tender["document_links"] = tender_dict["documents"]
+            
+            # Handle financial information
+            if isinstance(tender_dict.get("value"), (int, float)):
+                unified_tender["estimated_value"] = tender_dict["value"]
+                unified_tender["currency"] = tender_dict.get("currency")
+            
+            # Insert into unified_tenders table
+            response = client.table("unified_tenders").insert(unified_tender).execute()
             
             if response.data:
                 # Update the original tender to mark it as processed
                 update_response = (
                     client.table(tender.source_table)
-                    .update({"processed": True, "normalized": True})
+                    .update({"processed": True})
                     .eq("id", tender.id)
                     .execute()
                 )
                 
-                logger.info(f"Saved normalized tender {tender.id} from {tender.source_table}")
+                logger.info(f"Saved unified tender from {tender.source_table} with source ID {tender.id}")
                 return True
             
             return False
         
         except Exception as e:
-            logger.error(f"Error saving normalized tender {tender.id}: {str(e)}")
+            logger.error(f"Error saving unified tender {tender.id}: {str(e)}")
             return False
 
 

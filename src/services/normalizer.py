@@ -10,7 +10,7 @@ from datetime import datetime, date
 from typing import Any, Dict, List, Optional, TypeVar, Union
 
 from langdetect import detect
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_ai import Agent, RunContext
 
 from ..config import normalizer_config, settings
@@ -52,8 +52,53 @@ class NormalizationOutput(BaseModel):
         default_factory=list, description="Fields that could not be normalized"
     )
     notes: Optional[str] = Field(
-        None, description="Notes about the normalization process"
+        None, description="Any notes or explanations about the normalization process"
     )
+    
+    # Field validation
+    @model_validator(mode="after")
+    def validate_tender_fields(self) -> "NormalizationOutput":
+        """Validate that the tender has required fields and correct types."""
+        required_fields = ["title", "source_table", "source_id"]
+        for field in required_fields:
+            if field not in self.tender:
+                raise ValueError(f"Missing required field: {field}")
+        
+        # Validate field types
+        tender = self.tender
+        
+        # Date fields
+        date_fields = ["publication_date", "deadline_date", "normalized_at"]
+        for field in date_fields:
+            if field in tender and tender[field] and not isinstance(tender[field], (str, datetime, date)):
+                raise ValueError(f"Invalid type for {field}: must be a date/datetime or ISO string")
+        
+        # Numeric fields
+        numeric_fields = ["estimated_value"]
+        for field in numeric_fields:
+            if field in tender and tender[field] is not None:
+                try:
+                    # Convert to float if it's a string
+                    if isinstance(tender[field], str):
+                        tender[field] = float(tender[field].replace(",", ""))
+                    # Ensure it's a number
+                    float(tender[field])
+                except (ValueError, TypeError):
+                    raise ValueError(f"Invalid numeric value for {field}")
+        
+        # Status field
+        if "status" in tender and tender["status"]:
+            valid_statuses = ["active", "closed", "awarded", "canceled", "upcoming", "unknown"]
+            if isinstance(tender["status"], str) and tender["status"].lower() not in valid_statuses:
+                tender["status"] = "unknown"
+        
+        # Tender type field
+        if "tender_type" in tender and tender["tender_type"]:
+            valid_types = ["goods", "services", "works", "consulting", "mixed", "other", "unknown"]
+            if isinstance(tender["tender_type"], str) and tender["tender_type"].lower() not in valid_types:
+                tender["tender_type"] = "unknown"
+        
+        return self
 
 
 class TenderNormalizer:
@@ -87,24 +132,55 @@ class TenderNormalizer:
         }
 
     def _get_system_prompt(self) -> str:
-        """Get the system prompt for the normalization agent."""
+        """Get the system prompt for the LLM."""
         return """
-        You are a specialized data normalization assistant for tender data. Your job is to transform
-        raw tender data from various sources into a standardized format.
+        You are a specialized AI assistant for tender normalization.
         
-        Key principles to follow:
-        1. Always prioritize accuracy and completeness of information.
-        2. For critical fields (title, description, country), ensure they are never empty.
-        3. If a field is missing in the input but can be inferred from other fields, do so.
-        4. Make sure dates are in ISO format (YYYY-MM-DD).
-        5. If a field is in a non-English language and there's no English version, translate it.
-        6. Extract any embedded information that belongs in separate fields.
-        7. Validate and correct country names to use full names (e.g., "USA" → "United States").
-        8. Determine the appropriate tender status based on dates if status is missing.
-        9. Extract and normalize financial information, separating amount from currency.
-        10. Ensure organization names are properly formatted and include English versions when possible.
+        Your task is to normalize tender data from different sources into a consistent format.
+        You will be given raw tender data and your goal is to extract and standardize the following fields:
         
-        The normalized tender data should be comprehensive, accurate, and follow the standardized schema.
+        Required fields:
+        - title: Short, descriptive title of the tender opportunity
+        - source_table: The original data source (e.g., "sam_gov", "wb", "adb", etc.)
+        - source_id: Original identifier of the tender in the source system
+        
+        Important fields to extract (if available):
+        - description: Detailed description of what the tender requires
+        - tender_type: Type of tender (goods, services, works, consulting, mixed, other, unknown)
+        - status: Current status (active, closed, awarded, canceled, upcoming, unknown)
+        - publication_date: When the tender was published
+        - deadline_date: Submission deadline
+        - country: Country where the work/services will be performed
+        - city: Specific city or location
+        - organization_name: Name of the organization issuing the tender
+        - organization_id: ID of the issuing organization
+        - buyer: Entity making the purchase (often same as organization_name)
+        - project_name: Name of the overall project
+        - project_id: ID of the project
+        - project_number: Reference number for the project
+        - sector: Business/industry sector
+        - estimated_value: Monetary value of the tender
+        - currency: Currency of the tender value
+        - contact information:
+          - contact_name: Name of the contact person
+          - contact_email: Email address for inquiries
+          - contact_phone: Phone number for inquiries
+          - contact_address: Physical contact address
+        - url: Main URL of the tender notice
+        - document_links: Links to tender documents
+        - language: Original language of the tender
+        - notice_id: ID of the specific notice
+        - reference_number: Reference number for the tender
+        - procurement_method: Method used for procurement
+        
+        For each field, always choose the most specific and accurate value from the raw data.
+        If a field is not available in the raw data, do not include it in the output.
+        
+        For date fields, provide standardized ISO format (YYYY-MM-DD) when possible.
+        For status fields, normalize to one of: active, closed, awarded, canceled, upcoming, unknown.
+        For tender_type fields, normalize to one of: goods, services, works, consulting, mixed, other, unknown.
+        
+        Your response should follow the exact structure expected, with proper field types and values.
         """
 
     def _should_use_llm(self, tender: RawTender) -> tuple[bool, str]:
@@ -150,7 +226,7 @@ class TenderNormalizer:
 
     async def _normalize_with_llm(self, tender: RawTender) -> NormalizationResult:
         """
-        Normalize a tender using the LLM agent.
+        Normalize a tender using the LLM.
         
         Args:
             tender: The raw tender to normalize
@@ -163,33 +239,54 @@ class TenderNormalizer:
         fields_before = self._count_non_empty_fields(tender_dict)
         
         try:
-            # Run the agent with a timeout
-            normalization_input = NormalizationInput(
+            # Prepare input for LLM normalization
+            input_data = NormalizationInput(
                 raw_tender=tender_dict,
                 source_table=tender.source_table,
             )
             
+            # Create a run context (will be passed to the agent)
+            context = RunContext(model="mistral", temperature=0.1)
+            
+            # Initialize the agent
             try:
-                # Try with timeout parameter first (newer versions)
-                context = RunContext(timeout=settings.llm_timeout_seconds)
-                result = await self.agent.run(normalization_input, context=context)
-            except TypeError:
-                # Fall back to using without timeout (older versions)
-                logger.info("RunContext does not support timeout, using without timeout")
-                context = RunContext()
-                result = await self.agent.run(normalization_input, context=context)
+                agent = Agent(
+                    task="Normalize tender data",
+                    description=self._get_system_prompt(),
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize agent: {str(e)}")
+                # Try without optional parameters if we get an error
+                agent = Agent(description=self._get_system_prompt())
+                
+            # Run the normalization
+            result = await agent.run(input_data, context=context)
+            output = NormalizationOutput.model_validate(result)
             
-            # Create normalized tender model
-            normalized_data = result.tender
-            normalized_data["id"] = tender.id
-            normalized_data["source_table"] = tender.source_table
-            normalized_data["normalized_by"] = "pydantic-llm"
-            normalized_data["normalized_at"] = datetime.utcnow().isoformat()
-            
-            normalized_tender = NormalizedTender.model_validate(normalized_data)
-            
-            # Calculate stats
+            # Save performance data
             processing_time = time.time() - start_time
+            processing_time_ms = int(processing_time * 1000)
+            
+            # Ensure required fields and correct types
+            tender_data = output.tender
+            # Add fields that might be missing
+            tender_data["id"] = tender.id
+            tender_data["source_table"] = tender.source_table
+            tender_data["normalized_by"] = "LLM-Mistral"
+            tender_data["normalized_method"] = "llm"
+            tender_data["normalized_at"] = datetime.utcnow().isoformat()
+            tender_data["processing_time_ms"] = processing_time_ms
+            
+            # Handle dates
+            self._infer_status_from_dates(tender_data)
+            
+            # Ensure all critical fields are present
+            self._ensure_critical_fields(tender_data, tender)
+            
+            # Create the normalized tender
+            normalized_tender = NormalizedTender.model_validate(tender_data)
+            
+            # Calculate fields and improvement
             fields_after = self._count_non_empty_fields(normalized_tender.model_dump())
             improvement = (
                 ((fields_after - fields_before) / fields_before) * 100
@@ -197,7 +294,8 @@ class TenderNormalizer:
                 else 0
             )
             
-            return NormalizationResult(
+            # Update stats
+            result = NormalizationResult(
                 tender_id=tender.id,
                 source_table=tender.source_table,
                 success=True,
@@ -210,11 +308,15 @@ class TenderNormalizer:
                 improvement_percentage=improvement,
             )
             
-        except (Exception) as e:
-            # Fall back to rule-based normalization
-            logger.warning(
-                f"LLM normalization failed for {tender.id} from {tender.source_table}: {str(e)}"
-            )
+            self._update_performance_stats(result)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"LLM normalization failed for {tender.id}: {str(e)}")
+            logger.info(f"Falling back to rule-based normalization for {tender.id}")
+            
+            # Use the fallback method
             return await self._normalize_with_fallback(
                 tender, error=str(e), start_time=start_time
             )
@@ -244,7 +346,10 @@ class TenderNormalizer:
             normalized_data = {
                 "id": tender.id,
                 "source_table": tender.source_table,
+                "source_id": getattr(tender, "source_id", tender.id),
                 "normalized_by": "rule-based-fallback",
+                "normalized_method": "fallback",
+                "fallback_reason": error,
                 "normalized_at": datetime.utcnow().isoformat(),
             }
             
@@ -253,6 +358,8 @@ class TenderNormalizer:
                 "title", "description", "country", "country_code", "location",
                 "organization_name", "organization_id", "title_english",
                 "description_english", "organization_name_english", "language",
+                "buyer", "project_name", "project_id", "project_number", "sector",
+                "reference_number", "notice_id", "procurement_method",
             ]
             
             # Add source-specific field mappings
@@ -262,48 +369,108 @@ class TenderNormalizer:
                     "description": "description",
                     "country": "place_of_performance.country_name" if hasattr(tender, "place_of_performance") else None,
                     "organization_name": "organization_name",
+                    "buyer": "organization_name",
+                    "notice_id": "notice_id",
+                    "reference_number": "solicitation_number",
+                    "procurement_method": "competitive_procedures_code",
+                    "city": "place_of_performance.city_name" if hasattr(tender, "place_of_performance") else None,
+                    "contact_name": "point_of_contact",
+                    "contact_email": "point_of_contact_email",
+                    "contact_phone": "point_of_contact_phone",
                 },
                 "wb": {
                     "title": "title",
                     "description": "description",
                     "country": "country",
                     "organization_name": "contact_organization",
+                    "project_name": "project_name",
+                    "project_id": "project_id",
+                    "sector": "sector",
+                    "notice_id": "notice_no",
+                    "procurement_method": "procurement_method",
+                    "contact_name": "contact_person",
+                    "contact_email": "contact_email",
+                    "contact_phone": "contact_phone",
                 },
                 "adb": {
                     "title": "notice_title",
                     "description": "description",
                     "country": "country",
+                    "project_name": "project_name",
+                    "project_id": "project_id",
+                    "project_number": "project_number",
+                    "sector": "sector",
+                    "notice_id": "notice_number",
+                    "procurement_method": "procurement_method",
+                    "buyer": "executing_agency",
                 },
                 "ted_eu": {
                     "title": "title",
                     "description": "summary",
                     "organization_name": "organisation_name",
+                    "buyer": "organisation_name",
+                    "notice_id": "notice_id",
+                    "reference_number": "reference_number",
+                    "procurement_method": "procedure_type",
+                    "city": "town",
+                    "contact_name": "contact_officer_name",
+                    "contact_email": "contact_email",
+                    "contact_phone": "contact_telephone",
+                    "contact_address": "contact_address",
                 },
                 "ungm": {
                     "title": "title",
                     "description": "description",
                     "country": "beneficiary_countries",
+                    "organization_name": "un_organization",
+                    "reference_number": "reference",
+                    "deadline_date": "deadline",
+                    "notice_id": "notice_id",
+                    "buyer": "un_organization",
+                    "procurement_method": "procurement_method",
+                    "contact_name": "contact_name",
+                    "contact_email": "contact_email",
                 },
                 "afd_tenders": {
                     "title": "notice_title",
                     "description": "notice_content",
                     "country": "country",
                     "organization_name": "buyer",
+                    "buyer": "buyer",
+                    "reference_number": "reference",
+                    "notice_id": "notice_id",
+                    "sector": "sector",
                 },
                 "iadb": {
                     "title": "notice_title",
                     "description": "project_name",
                     "country": "country",
+                    "project_name": "project_name",
+                    "project_id": "project_number",
+                    "notice_id": "notice_id",
+                    "buyer": "borrower",
+                    "sector": "sector",
                 },
                 "afdb": {
                     "title": "title",
                     "description": "description",
                     "country": "country",
+                    "project_name": "project_name",
+                    "project_id": "project_number",
+                    "sector": "sector",
+                    "notice_id": "reference_number",
+                    "reference_number": "reference_number",
+                    "buyer": "borrower",
                 },
                 "aiib": {
                     "title": "project_notice",
                     "description": "project_notice",
                     "country": "member",
+                    "project_name": "project_name",
+                    "project_id": "project_id",
+                    "sector": "sector",
+                    "notice_id": "notice_id",
+                    "buyer": "borrower",
                 }
             }
             
@@ -311,44 +478,130 @@ class TenderNormalizer:
             if tender.source_table in source_specific_mappings:
                 mappings = source_specific_mappings[tender.source_table]
                 for norm_field, source_field in mappings.items():
-                    if source_field and hasattr(tender, source_field):
-                        value = getattr(tender, source_field, None)
+                    if source_field:
+                        # Handle nested fields with dot notation (e.g., "place_of_performance.city_name")
+                        if "." in source_field:
+                            parts = source_field.split(".")
+                            value = tender_dict
+                            for part in parts:
+                                if isinstance(value, dict) and part in value:
+                                    value = value[part]
+                                else:
+                                    value = None
+                                    break
+                        else:
+                            # Try to get from attributes first
+                            value = getattr(tender, source_field, None)
+                            # If not found, try to get from source_data
+                            if value is None and hasattr(tender, "source_data") and tender.source_data:
+                                value = tender.source_data.get(source_field)
+                        
                         if value and str(value).strip():
                             normalized_data[norm_field] = value
             
             # Then apply direct mappings for any fields not already mapped
             for field in direct_field_mappings:
                 if field not in normalized_data:
+                    # Try to get from attributes first
                     value = getattr(tender, field, None)
+                    # If not found, try to get from source_data
+                    if value is None and hasattr(tender, "source_data") and tender.source_data:
+                        value = tender.source_data.get(field)
+                    
                     if value and str(value).strip():
                         normalized_data[field] = value
             
-            # Handle special fields
-            # URL
+            # Handle URL fields
             for url_field in ["url", "link", "web_link"]:
                 url_value = getattr(tender, url_field, None)
+                if url_value is None and hasattr(tender, "source_data") and tender.source_data:
+                    url_value = tender.source_data.get(url_field)
+                
                 if url_value and str(url_value).strip():
                     normalized_data["url"] = url_value
                     break
             
+            # Handle document links
+            documents = []
+            doc_links = getattr(tender, "documents", None) or getattr(tender, "document_links", None)
+            
+            if doc_links:
+                if isinstance(doc_links, list):
+                    for doc in doc_links:
+                        if isinstance(doc, dict):
+                            documents.append(doc)
+                        elif isinstance(doc, str) and (doc.startswith("http://") or doc.startswith("https://")):
+                            documents.append({"url": doc})
+                elif isinstance(doc_links, dict):
+                    documents.append(doc_links)
+                elif isinstance(doc_links, str) and (doc_links.startswith("http://") or doc_links.startswith("https://")):
+                    documents.append({"url": doc_links})
+            
+            if documents:
+                normalized_data["documents"] = documents
+            
+            # Contact information
+            contact_fields = {
+                "name": ["contact_name", "point_of_contact", "contact_person"],
+                "email": ["contact_email", "email", "point_of_contact_email"],
+                "phone": ["contact_phone", "phone", "telephone", "point_of_contact_phone"],
+                "address": ["contact_address", "address"]
+            }
+            
+            contact_info = {}
+            for field, sources in contact_fields.items():
+                for source in sources:
+                    value = getattr(tender, source, None)
+                    if value is None and hasattr(tender, "source_data") and tender.source_data:
+                        value = tender.source_data.get(source)
+                    
+                    if value and str(value).strip():
+                        contact_info[field] = value
+                        break
+            
+            if contact_info:
+                normalized_data["contact"] = contact_info
+            
             # Dates
             for date_field in ["publication_date", "deadline_date"]:
                 date_value = getattr(tender, date_field, None)
+                if date_value is None and hasattr(tender, "source_data") and tender.source_data:
+                    date_value = tender.source_data.get(date_field)
+                
                 if date_value:
                     if isinstance(date_value, (datetime, date)):
                         normalized_data[date_field] = date_value
                     elif isinstance(date_value, str):
                         try:
-                            # Simple ISO format parsing
-                            normalized_data[date_field] = datetime.fromisoformat(
-                                date_value.replace("Z", "+00:00")
-                            )
+                            # Try multiple date formats
+                            for fmt in [
+                                "%Y-%m-%dT%H:%M:%S", 
+                                "%Y-%m-%d %H:%M:%S",
+                                "%Y-%m-%d",
+                                "%d/%m/%Y",
+                                "%m/%d/%Y"
+                            ]:
+                                try:
+                                    parsed_date = datetime.strptime(date_value, fmt)
+                                    normalized_data[date_field] = parsed_date
+                                    break
+                                except ValueError:
+                                    continue
+                            
+                            # If none of the formats worked, try ISO format
+                            if date_field not in normalized_data:
+                                normalized_data[date_field] = datetime.fromisoformat(
+                                    date_value.replace("Z", "+00:00")
+                                )
                         except (ValueError, TypeError):
                             # Keep as is if parsing fails
-                            pass
+                            normalized_data[date_field] = date_value
             
             # Status - convert string to enum
             status_value = getattr(tender, "status", None)
+            if status_value is None and hasattr(tender, "source_data") and tender.source_data:
+                status_value = tender.source_data.get("status")
+            
             if status_value:
                 try:
                     normalized_data["status"] = TenderStatus(status_value.lower())
@@ -361,6 +614,9 @@ class TenderNormalizer:
             
             # Tender type - convert string to enum
             type_value = getattr(tender, "tender_type", None)
+            if type_value is None and hasattr(tender, "source_data") and tender.source_data:
+                type_value = tender.source_data.get("tender_type")
+            
             if type_value:
                 try:
                     normalized_data["tender_type"] = TenderType(type_value.lower())
@@ -369,7 +625,12 @@ class TenderNormalizer:
             
             # Value and currency
             value = getattr(tender, "value", None)
+            if value is None and hasattr(tender, "source_data") and tender.source_data:
+                value = tender.source_data.get("value")
+            
             currency = getattr(tender, "currency", None)
+            if currency is None and hasattr(tender, "source_data") and tender.source_data:
+                currency = tender.source_data.get("currency")
             
             if value is not None:
                 if isinstance(value, (int, float)):
@@ -387,8 +648,19 @@ class TenderNormalizer:
             if currency:
                 normalized_data["currency"] = currency
             
+            # Include original data
+            if hasattr(tender, "source_data") and tender.source_data:
+                normalized_data["source_data"] = tender.source_data
+            
             # Generate missing critical fields
             self._ensure_critical_fields(normalized_data, tender)
+            
+            # Calculate stats
+            processing_time = time.time() - start_time
+            processing_time_ms = int(processing_time * 1000)
+            
+            # Include processing time in milliseconds
+            normalized_data["processing_time_ms"] = processing_time_ms
             
             # Create normalized tender model
             normalized_tender = NormalizedTender.model_validate(normalized_data)
@@ -431,7 +703,7 @@ class TenderNormalizer:
                 method_used="failed",
                 fields_before=fields_before,
                 fields_after=0,
-                improvement_percentage=0.0,
+                improvement_percentage=0,
             )
 
     def _infer_status_from_dates(self, normalized_data: Dict[str, Any]) -> None:
@@ -511,12 +783,24 @@ class TenderNormalizer:
                     "sam_gov": "United States",
                     "wb": "Global",
                     "adb": "Asia",
-                    "ted": "European Union",
-                    "un_tenders": "Global",
+                    "ted_eu": "European Union",
+                    "ungm": "Global",
+                    "afd_tenders": "Global",
+                    "iadb": "Latin America",
+                    "afdb": "Africa",
+                    "aiib": "Asia",
                 }
                 normalized_data["country"] = source_country_map.get(
                     tender.source_table, "Unknown"
                 )
+        
+        # Ensure source_id is a string and is always present
+        if not normalized_data.get("source_id"):
+            # Default to tender.id if source_id is not set
+            normalized_data["source_id"] = str(tender.id)
+        elif not isinstance(normalized_data["source_id"], str):
+            # Convert to string if not already a string
+            normalized_data["source_id"] = str(normalized_data["source_id"])
 
     def _count_non_empty_fields(self, data: Dict[str, Any]) -> int:
         """Count the number of non-empty fields in a dictionary."""
