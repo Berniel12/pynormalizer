@@ -56,6 +56,13 @@
         "description": "Maximum number of tenders to process per source",
         "default": 25,
         "editor": "number"
+      },
+      "testMode": {
+        "title": "Test Mode",
+        "type": "boolean",
+        "description": "Run in test mode with detailed analysis logging (if true, limit defaults to 3)",
+        "default": false,
+        "editor": "checkbox"
       }
     },
     "required": []

@@ -1467,16 +1467,75 @@ class TenderNormalizer:
         """
         results_by_source = {}
         
-        # Set up a dedicated analysis log file
+        # Set up a dedicated analysis log file compatible with Apify
         analysis_log_path = "normalization_analysis.log"
+        import logging
+        import os
+        
+        # For Apify, use the key_value_store for logs
+        is_on_apify = os.environ.get("APIFY_IS_AT_HOME") == "1"
+        
         analysis_logger = logging.getLogger("normalization_analysis")
         
         # If the handler doesn't exist, add it
-        if not any(isinstance(h, logging.FileHandler) and h.baseFilename.endswith("normalization_analysis.log") for h in analysis_logger.handlers):
-            file_handler = logging.FileHandler(analysis_log_path)
+        if not any(isinstance(h, logging.FileHandler) for h in analysis_logger.handlers):
+            if is_on_apify:
+                try:
+                    # Use stdout for Apify as it will be captured in logs
+                    import sys
+                    handler = logging.StreamHandler(sys.stdout)
+                    
+                    # Also write to Apify key-value store if possible
+                    try:
+                        from apify import Actor
+                        logger.info("Running on Apify, setting up key-value store for logs")
+                        
+                        async def log_to_apify():
+                            # Create a buffer for storing log content
+                            log_buffer = []
+                            
+                            # Add a custom handler to capture logs
+                            class ApifyLogHandler(logging.Handler):
+                                def emit(self, record):
+                                    log_buffer.append(self.format(record))
+                                    
+                            # Add our custom handler
+                            apify_handler = ApifyLogHandler()
+                            analysis_logger.addHandler(apify_handler)
+                            
+                            # Return the function to flush logs to Apify KV store
+                            async def flush_logs_to_apify():
+                                try:
+                                    if log_buffer:
+                                        log_content = "\n".join(log_buffer)
+                                        await Actor.init()
+                                        # Store the logs in the default key-value store
+                                        await Actor.get_value_store().set_value(
+                                            "normalization_analysis.log", 
+                                            log_content, 
+                                            content_type="text/plain"
+                                        )
+                                        logger.info("Analysis logs saved to Apify key-value store")
+                                except Exception as e:
+                                    logger.error(f"Failed to save logs to Apify key-value store: {str(e)}")
+                                    
+                            return flush_logs_to_apify
+                        
+                        # Store the function to call at the end
+                        flush_logs_func = asyncio.create_task(log_to_apify())
+                    except ImportError:
+                        logger.warning("Apify package not available, falling back to stdout only")
+                        flush_logs_func = None
+                except Exception as e:
+                    logger.error(f"Error setting up Apify logging: {str(e)}")
+                    handler = logging.StreamHandler(sys.stdout)
+            else:
+                # Local environment - use file handler
+                handler = logging.FileHandler(analysis_log_path)
+                
             file_formatter = logging.Formatter('%(asctime)s - %(message)s')
-            file_handler.setFormatter(file_formatter)
-            analysis_logger.addHandler(file_handler)
+            handler.setFormatter(file_formatter)
+            analysis_logger.addHandler(handler)
             analysis_logger.setLevel(logging.INFO)
         
         analysis_logger.info("===== STARTING NEW TEST BATCH ANALYSIS =====")
@@ -1701,6 +1760,14 @@ class TenderNormalizer:
                     analysis_logger.info(f"  - {error}: {count}/{len(source_results)} ({percentage:.1f}%)")
             
             analysis_logger.info(f"{'-'*80}\n")
+        
+        # When running on Apify, save logs to key-value store
+        if is_on_apify and 'flush_logs_func' in locals() and flush_logs_func:
+            try:
+                await flush_logs_func
+                logger.info("Analysis logs saved to Apify key-value store")
+            except Exception as e:
+                logger.error(f"Failed to save logs to Apify key-value store: {str(e)}")
         
         # Log overall summary
         total_tenders = sum(len(results) for results in results_by_source.values())
