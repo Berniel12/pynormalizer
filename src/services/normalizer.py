@@ -222,19 +222,44 @@ class NormalizationInput(BaseModel):
             # Ensure raw_tender is at least an empty dict, not None
             self.raw_tender = {}
         
-        # Ensure critical fields exist (even if empty)
-        critical_fields = ["id", "source_table", "title", "description"]
-        for field in critical_fields:
-            if field not in self.raw_tender:
-                self.raw_tender[field] = ""
-            elif self.raw_tender[field] is None:
-                # Replace None with empty strings for text fields
-                self.raw_tender[field] = ""
+        # Ensure critical fields exist and have valid values
+        critical_fields = {
+            "id": "unknown_id",
+            "source_table": self.source_table,
+            "title": "Unknown title",
+            "description": "Unknown description",
+            "country": "Unknown country",
+            "url": "",
+            "organization_name": ""
+        }
         
-        # Ensure source_table is consistent
-        if "source_table" in self.raw_tender:
-            # Ensure value from the model overrides any value in raw_tender
-            self.raw_tender["source_table"] = self.source_table
+        for field, default_value in critical_fields.items():
+            # Check if field is missing or None
+            if field not in self.raw_tender or self.raw_tender[field] is None:
+                self.raw_tender[field] = default_value
+            # Check if field is empty string
+            elif isinstance(self.raw_tender[field], str) and not self.raw_tender[field].strip():
+                self.raw_tender[field] = default_value
+            # Convert non-string fields to strings where needed
+            elif field in ["title", "description", "country", "organization_name"] and not isinstance(self.raw_tender[field], str):
+                try:
+                    self.raw_tender[field] = str(self.raw_tender[field])
+                except Exception:
+                    self.raw_tender[field] = default_value
+        
+        # Ensure ID is always a string
+        if not isinstance(self.raw_tender["id"], str):
+            self.raw_tender["id"] = str(self.raw_tender["id"])
+        
+        # Always force source_table to match the model value
+        self.raw_tender["source_table"] = self.source_table
+        
+        # Ensure URL is a valid string
+        if "url" in self.raw_tender and not isinstance(self.raw_tender["url"], str):
+            try:
+                self.raw_tender["url"] = str(self.raw_tender["url"])
+            except Exception:
+                self.raw_tender["url"] = ""
         
         return self
 
@@ -246,66 +271,59 @@ class NormalizationInput(BaseModel):
         # Deep sanitization of the raw_tender data
         if 'raw_tender' in data and data['raw_tender']:
             sanitized_tender = {}
-            for key, value in data['raw_tender'].items():
-                # Convert datetime objects to ISO format strings
-                if isinstance(value, (datetime, date)):
-                    sanitized_tender[key] = value.isoformat()
-                # Convert None values to empty strings for text fields
-                elif value is None and key in ['title', 'description', 'organization_name']:
-                    sanitized_tender[key] = ""
-                # Handle potential problematic types (like custom objects) by converting to string
-                elif not isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                    try:
-                        sanitized_tender[key] = str(value)
-                    except Exception:
-                        sanitized_tender[key] = ""
-                # Handle nested lists and dictionaries
-                elif isinstance(value, dict):
-                    # Recursively sanitize dictionaries
-                    sanitized_dict = {}
-                    for k, v in value.items():
-                        if isinstance(v, (datetime, date)):
-                            sanitized_dict[k] = v.isoformat()
-                        elif not isinstance(v, (str, int, float, bool, list, dict, type(None))):
-                            try:
-                                sanitized_dict[k] = str(v)
-                            except Exception:
-                                sanitized_dict[k] = ""
-                        else:
-                            sanitized_dict[k] = v
-                    sanitized_tender[key] = sanitized_dict
-                elif isinstance(value, list):
-                    # Sanitize lists
-                    sanitized_list = []
-                    for item in value:
-                        if isinstance(item, (datetime, date)):
-                            sanitized_list.append(item.isoformat())
-                        elif isinstance(item, dict):
-                            # Handle dictionary items in lists
-                            sanitized_dict = {}
-                            for k, v in item.items():
-                                if isinstance(v, (datetime, date)):
-                                    sanitized_dict[k] = v.isoformat()
-                                elif not isinstance(v, (str, int, float, bool, list, dict, type(None))):
-                                    try:
-                                        sanitized_dict[k] = str(v)
-                                    except Exception:
-                                        sanitized_dict[k] = ""
-                                else:
-                                    sanitized_dict[k] = v
-                            sanitized_list.append(sanitized_dict)
-                        elif not isinstance(item, (str, int, float, bool, dict, type(None))):
-                            try:
-                                sanitized_list.append(str(item))
-                            except Exception:
-                                sanitized_list.append("")
-                        else:
-                            sanitized_list.append(item)
-                    sanitized_tender[key] = sanitized_list
-                else:
-                    sanitized_tender[key] = value
             
-            # Replace the original raw_tender with the sanitized version
+            # Helper function for recursive sanitization
+            def sanitize_value(value):
+                if isinstance(value, (datetime, date)):
+                    return value.isoformat()
+                elif value is None:
+                    return ""
+                elif isinstance(value, (str)):
+                    # Replace problematic characters in strings that might cause issues
+                    # Replace curly quotes, apostrophes and other special characters with simple versions
+                    cleaned_text = value
+                    # Replace various apostrophes and quotes with standard ones
+                    replacements = {
+                        "'": "'", 
+                        "'": "'", 
+                        "‚": "'", 
+                        "‛": "'",
+                        """: '"', 
+                        """: '"', 
+                        "„": '"', 
+                        "‟": '"',
+                        "–": "-",
+                        "—": "-",
+                        "…": "...",
+                    }
+                    for old, new in replacements.items():
+                        cleaned_text = cleaned_text.replace(old, new)
+                    return cleaned_text
+                elif isinstance(value, (int, float, bool)):
+                    return value
+                elif isinstance(value, (list, tuple)):
+                    return [sanitize_value(item) for item in value]
+                elif isinstance(value, dict):
+                    return {k: sanitize_value(v) for k, v in value.items()}
+                else:
+                    # Handle any other types by converting to string
+                    try:
+                        return str(value)
+                    except Exception:
+                        return ""
+            
+            # Sanitize each field in the raw_tender
+            for key, value in data['raw_tender'].items():
+                sanitized_tender[key] = sanitize_value(value)
+                
+                # Ensure critical fields are never None or missing
+                if key in ['title', 'description', 'country'] and (sanitized_tender[key] is None or sanitized_tender[key] == ""):
+                    sanitized_tender[key] = f"Unknown {key}"
+            
+            # Make sure source_table is always set correctly
+            sanitized_tender['source_table'] = data['source_table']
+            
+            # Update the raw_tender with the sanitized version
             data['raw_tender'] = sanitized_tender
         
         return data
@@ -542,27 +560,45 @@ class TenderNormalizer:
                 source_table=tender.source_table,
             )
             
-            # Add debugging output to trace the issue
-            logger.debug(f"Input data for LLM: {input_data.model_dump_json(indent=2)}")
+            # Add more detailed debugging output to trace the issue
+            logger.debug(f"[{tender.source_table}:{tender.id}] Input data for LLM normalization:")
+            # Log specific critical fields that might be problematic
+            for field in ['title', 'description', 'country', 'source_table', 'id']:
+                if field in input_data.raw_tender:
+                    field_value = input_data.raw_tender[field]
+                    field_type = type(field_value).__name__
+                    field_len = len(str(field_value)) if field_value else 0
+                    logger.debug(f"[{tender.source_table}:{tender.id}] Field '{field}': type={field_type}, len={field_len}")
+                    # Log the actual content for very short fields to help debugging
+                    if field_len < 100 and field_value:
+                        logger.debug(f"[{tender.source_table}:{tender.id}] Field '{field}' content: {field_value}")
+                else:
+                    logger.debug(f"[{tender.source_table}:{tender.id}] Field '{field}' is missing")
             
             # For pydantic-ai version 0.0.31, we DON'T pass context or system_prompt to run()
             # Instead, we set system_prompt when creating the Agent instance
-            # The agent was already initialized in __init__ with the correct settings
             
-            logger.debug("Running agent with input_data only (pydantic-ai 0.0.31 API)")
+            logger.debug(f"[{tender.source_table}:{tender.id}] Running agent with input_data only (pydantic-ai 0.0.31 API)")
             try:
+                # Serialize the input data to JSON first to ensure it's fully sanitized
+                input_json = input_data.model_dump_json()
+                # Then parse it back to ensure it's a clean object
+                from pydantic import json
+                clean_input = NormalizationInput.model_validate_json(input_json)
+                
                 # In pydantic-ai 0.0.31, agent.run() just takes the input data
-                result = await self.agent.run(input_data)
-                logger.debug(f"Agent run successful: {type(result)}")
+                logger.debug(f"[{tender.source_table}:{tender.id}] Calling agent.run() with validated input")
+                result = await self.agent.run(clean_input)
+                logger.debug(f"[{tender.source_table}:{tender.id}] Agent run successful: {type(result)}")
                 
                 # Validate the output to ensure it matches our expected schema
                 if not isinstance(result, NormalizationOutput):
-                    logger.error(f"Expected NormalizationOutput but got {type(result)}")
+                    logger.error(f"[{tender.source_table}:{tender.id}] Expected NormalizationOutput but got {type(result)}")
                     return await self._normalize_with_fallback(
                         tender, f"LLM returned incorrect type: {type(result)}", start_time
                     )
                 
-                logger.debug(f"LLM normalization output: {result.model_dump_json(indent=2)}")
+                logger.debug(f"[{tender.source_table}:{tender.id}] LLM normalization successful")
                 
                 # Rest of processing
                 normalized_data = result.tender
@@ -572,27 +608,45 @@ class TenderNormalizer:
                 # Check specifically for the "Expected code to be unreachable" error
                 error_msg = str(e)
                 if "Expected code to be unreachable" in error_msg:
-                    logger.error(f"Caught pydantic-ai validation error: {error_msg}")
+                    logger.error(f"[{tender.source_table}:{tender.id}] Caught pydantic-ai validation error: {error_msg}")
                     # Log detailed input data to help diagnose the issue
-                    logger.error(f"Problematic input data structure: {type(input_data.raw_tender)}")
+                    logger.error(f"[{tender.source_table}:{tender.id}] Problematic input data structure:")
+                    
+                    # Dump the raw_tender to see what might be causing the issue
+                    try:
+                        import json
+                        # Try to json dump the input data to see if there are serialization issues
+                        json_dump = json.dumps(input_data.raw_tender)
+                        logger.error(f"[{tender.source_table}:{tender.id}] raw_tender serializes correctly to JSON")
+                    except Exception as json_err:
+                        logger.error(f"[{tender.source_table}:{tender.id}] raw_tender JSON serialization error: {str(json_err)}")
+                    
                     try:
                         # Try to identify the specific field causing the issue
                         if "but got: " in error_msg:
                             problem_field = error_msg.split("but got: ")[1].strip()
+                            logger.error(f"[{tender.source_table}:{tender.id}] Problem section from error: {problem_field}")
+                            
                             if problem_field.startswith("("):
-                                problem_field = problem_field.strip("()'")
-                                parts = problem_field.split(",", 1)
-                                if len(parts) > 1:
-                                    field_name = parts[0].strip("'")
-                                    logger.error(f"Problem appears to be in field: {field_name}")
-                    except Exception:
-                        pass  # If we can't parse the error, just continue to fallback
+                                problem_parts = problem_field.strip("()").split(",", 1)
+                                if len(problem_parts) > 1:
+                                    field_name = problem_parts[0].strip("'\"")
+                                    field_value = problem_parts[1].strip()
+                                    logger.error(f"[{tender.source_table}:{tender.id}] Problem appears to be in field: {field_name}")
+                                    if field_name in input_data.raw_tender:
+                                        problem_value = input_data.raw_tender[field_name]
+                                        logger.error(f"[{tender.source_table}:{tender.id}] Problem field '{field_name}' value: {type(problem_value)} = {problem_value}")
+                    except Exception as parse_err:
+                        logger.error(f"[{tender.source_table}:{tender.id}] Error parsing problem field: {str(parse_err)}")
                     
                     return await self._normalize_with_fallback(tender, f"LLM validation error: {error_msg}", start_time)
                 # Re-raise other value errors
                 raise
             except Exception as e:
-                logger.error(f"LLM normalization failed for {tender.id} from {tender.source_table}: {str(e)}")
+                logger.error(f"[{tender.source_table}:{tender.id}] LLM normalization failed: {str(e)}")
+                # Log traceback for better debugging
+                import traceback
+                logger.error(f"[{tender.source_table}:{tender.id}] Exception traceback: {traceback.format_exc()}")
                 return await self._normalize_with_fallback(tender, str(e), start_time)
 
             # Essential fields check and fallback if needed
