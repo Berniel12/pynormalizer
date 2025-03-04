@@ -203,13 +203,40 @@ class SupabaseClient:
                             .execute()
                         )
                     elif hasattr(tender, "source_id") and tender.source_id:
-                        # Try using source_id as the primary key
-                        update_response = (
-                            client.table(tender.source_table)
-                            .update({"processed": True})
-                            .eq("source_id", tender.source_id)
-                            .execute()
-                        )
+                        # Try using source_id as the primary key - this seems to be failing
+                        # Let's modify this to use other fields
+                        try:
+                            # Map source tables to their known primary key fields based on error messages
+                            table_pk_map = {
+                                "sam_gov": "opportunity_id",
+                                "wb": "notice_id",
+                                "adb": "id",
+                                "ted_eu": "id",
+                                "ungm": "id",
+                                "afd_tenders": "id",
+                                "iadb": "project_number",
+                                "afdb": "id",
+                                "aiib": "id"
+                            }
+                            
+                            pk_field = table_pk_map.get(tender.source_table, "id")
+                            pk_value = tender.id
+                            
+                            # For sam_gov, we might need to get opportunity_id from original data
+                            if tender.source_table == "sam_gov" and tender.source_data and "opportunity_id" in tender.source_data:
+                                pk_value = tender.source_data["opportunity_id"]
+                            
+                            # Log what we're trying to use for debugging
+                            logger.info(f"Updating processed flag for {tender.source_table} using {pk_field}={pk_value}")
+                            
+                            update_response = (
+                                client.table(tender.source_table)
+                                .update({"processed": True})
+                                .eq(pk_field, pk_value)
+                                .execute()
+                            )
+                        except Exception as e:
+                            logger.error(f"Error updating processed flag using mapped PK for {tender.source_table}: {str(e)}")
                     else:
                         # Try some common primary key names
                         for pk_field in ["id", "tender_id", "_id", "notice_id", "record_id"]:
