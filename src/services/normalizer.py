@@ -951,56 +951,83 @@ class TenderNormalizer:
             
             # Handle URL fields - Check all possible URL field names, but prioritize source-specific ones
             url_found = False
+            source_url_found = False  # Flag to track if we found an official source platform URL
             
-            # First check the source-specific primary URL field
-            primary_url_field = source_url_fields[0] if source_url_fields else None
+            # First check the source-specific primary URL fields (which are ordered by priority)
+            source_url_fields = self._get_url_fields_for_source(tender.source_table)
             
-            if primary_url_field:
-                # Check direct attribute
-                url_value = getattr(tender, primary_url_field, None)
+            # Try to find the primary source platform URL
+            for url_field in source_url_fields[:2]:  # Check the top 2 priority fields for this source
+                url_value = getattr(tender, url_field, None)
                 if url_value is None and hasattr(tender, "source_data") and tender.source_data:
-                    url_value = tender.source_data.get(primary_url_field)
+                    url_value = tender.source_data.get(url_field)
                 
                 if url_value and str(url_value).strip():
-                    normalized_data["url"] = clean_url(str(url_value))
+                    clean_url_value = clean_url(str(url_value))
+                    normalized_data["url"] = clean_url_value
+                    # Also save as source_url to clearly indicate this is the official source platform URL
+                    normalized_data["source_url"] = clean_url_value
                     url_found = True
-                    logger.info(f"Found primary URL from field {primary_url_field}: {normalized_data['url']}")
+                    source_url_found = True
+                    logger.info(f"Found official source platform URL from field {url_field}: {clean_url_value}")
+                    break  # Stop after finding the highest priority source URL
             
-            # If no primary URL found, check other URL fields
+            # If no primary source URL found, check other URL fields
             if not url_found:
-                for url_field in url_field_names:
+                for url_field in source_url_fields[2:]:  # Check remaining URL fields
+                    # Check for the field in normalized data
                     if url_field in normalized_data and normalized_data[url_field]:
-                        # If we already have a primary URL but found another one, add it to document_links
-                        if url_found and url_field != "url":
-                            normalized_data.setdefault("document_links", [])
-                            normalized_data["document_links"].append({"url": clean_url(normalized_data[url_field])})
-                        else:
-                            # Set as primary URL if we don't have one yet
-                            normalized_data["url"] = clean_url(normalized_data[url_field])
-                            url_found = True
+                        clean_url_value = clean_url(normalized_data[url_field])
+                        normalized_data["url"] = clean_url_value
+                        url_found = True
+                        logger.info(f"Found URL from field {url_field}: {clean_url_value}")
+                        break
                     
-                    # Also check tender attributes and source_data
-                    if not url_found or url_field != "url":
-                        url_value = getattr(tender, url_field, None)
-                        if url_value is None and hasattr(tender, "source_data") and tender.source_data:
-                            url_value = tender.source_data.get(url_field)
-                        
-                        if url_value and str(url_value).strip():
-                            if url_found and url_field != "url":
-                                normalized_data.setdefault("document_links", [])
-                                normalized_data["document_links"].append({"url": clean_url(str(url_value))})
-                            else:
-                                normalized_data["url"] = clean_url(str(url_value))
-                                url_found = True
+                    # Check tender attributes and source_data
+                    url_value = getattr(tender, url_field, None)
+                    if url_value is None and hasattr(tender, "source_data") and tender.source_data:
+                        url_value = tender.source_data.get(url_field)
+                    
+                    if url_value and str(url_value).strip():
+                        clean_url_value = clean_url(str(url_value))
+                        normalized_data["url"] = clean_url_value
+                        url_found = True
+                        logger.info(f"Found URL from field {url_field}: {clean_url_value}")
+                        break
             
-            # Extract URLs from description and other text fields only as a fallback
+            # If we found a URL but not an official source URL, collect all other URLs as document_links
+            for url_field in source_url_fields:
+                # Skip the field we already used for the main URL
+                if url_found and url_field in normalized_data and normalized_data.get("url") == normalized_data.get(url_field):
+                    continue
+                
+                # Check for additional URLs in normalized data
+                if url_field in normalized_data and normalized_data[url_field]:
+                    normalized_data.setdefault("document_links", [])
+                    normalized_data["document_links"].append({"url": clean_url(normalized_data[url_field])})
+                
+                # Check tender attributes and source_data for additional URLs
+                url_value = getattr(tender, url_field, None)
+                if url_value is None and hasattr(tender, "source_data") and tender.source_data:
+                    url_value = tender.source_data.get(url_field)
+                
+                if url_value and str(url_value).strip():
+                    # Skip if this is already our main URL
+                    if url_found and normalized_data.get("url") == clean_url(str(url_value)):
+                        continue
+                    
+                    normalized_data.setdefault("document_links", [])
+                    normalized_data["document_links"].append({"url": clean_url(str(url_value))})
+            
+            # Extract URLs from description and other text fields ONLY as a last resort fallback
             if not url_found and "description" in normalized_data and normalized_data["description"]:
                 urls = extract_urls_from_text(normalized_data["description"])
                 if urls:
-                    normalized_data["url"] = urls[0]  # No need to clean as extract_urls_from_text already cleans
+                    normalized_data["url"] = urls[0]
                     url_found = True
-                    logger.info(f"Extracted URL from description: {urls[0]}")
+                    logger.info(f"Extracted URL from description as last resort: {urls[0]}")
                     
+                    # Add remaining URLs as document links
                     if len(urls) > 1:
                         normalized_data.setdefault("document_links", [])
                         for url in urls[1:]:
@@ -1009,6 +1036,8 @@ class TenderNormalizer:
             # Log if no URL was found
             if not url_found:
                 logger.warning(f"No URL found for tender {tender.id} from {tender.source_table}")
+            elif not source_url_found:
+                logger.warning(f"No official source platform URL found for tender {tender.id} from {tender.source_table}, using alternative URL")
             
             # Handle document links
             documents = []
@@ -1875,25 +1904,32 @@ class TenderNormalizer:
         return results_by_source
     
     def _get_url_fields_for_source(self, source_table: str) -> List[str]:
-        """Get URL field names for a specific source table."""
-        # Base URL fields to check in all sources
-        base_fields = ["url", "link", "web_link"]
-        
-        # Source-specific URL fields
-        source_fields = {
-            "sam_gov": ["solicitation_link", "opportunity_link"],
-            "wb": ["link"],
-            "adb": ["link"],
-            "ted_eu": ["notice_url"],
-            "ungm": ["link"],
-            "afd_tenders": ["notice_url"],
-            "iadb": ["link"],
-            "afdb": ["tender_url"],
-            "aiib": ["link"]
+        """
+        Get URL field names for a specific source table.
+        Returns a list of field names, with official source platform URL fields first.
+        """
+        # Source-specific primary URL fields (official source platform URLs)
+        # These are the most important URLs to preserve as they link back to the original tender
+        source_primary_fields = {
+            "sam_gov": ["beta_url", "solicitation_link", "opportunity_link"],  # beta_url is the official SAM.gov URL
+            "wb": ["notice_url", "link"],  # World Bank official notice URL
+            "adb": ["link", "notice_url"],  # ADB official tender notice URL
+            "ted_eu": ["notice_url", "tender_url"],  # TED EU official notice URL
+            "ungm": ["link", "notice_url"],  # UNGM official tender link
+            "afd_tenders": ["notice_url", "link"],  # AFD official notice URL
+            "iadb": ["link", "project_url"],  # IADB official project/tender link
+            "afdb": ["tender_url", "link"],  # AfDB official tender URL
+            "aiib": ["link", "notice_url"]  # AIIB official link
         }
         
-        # Combine base fields with source-specific fields
-        return base_fields + source_fields.get(source_table, [])
+        # Secondary URL fields - these might contain related but not primary URLs
+        secondary_fields = ["url", "web_link", "document_url", "related_link"]
+        
+        # Get the primary fields for this source, or use an empty list if not found
+        primary_fields = source_primary_fields.get(source_table, [])
+        
+        # Return primary fields first (most important), then secondary fields
+        return primary_fields + secondary_fields
 
     def _map_standard_tender_type(self, normalized_data: Dict[str, Any], tender: RawTender) -> None:
         """
