@@ -212,8 +212,21 @@ class NormalizationInput(BaseModel):
         ..., description="The raw tender data to be normalized"
     )
     source_table: str = Field(
-        ..., description="The source table name (e.g., 'sam_gov', 'wb')"
+        ..., description="Source table name (e.g. 'sam_gov', 'wb', etc.)"
     )
+
+    # Ensure input is serializable for LLM - crucial for pydantic-ai 0.0.31
+    def model_dump(self, **kwargs):
+        """Ensure complex types are serialized properly for the LLM."""
+        data = super().model_dump(**kwargs)
+        
+        # Convert any datetime objects to ISO format strings
+        if 'raw_tender' in data and data['raw_tender']:
+            for key, value in data['raw_tender'].items():
+                if isinstance(value, (datetime, date)):
+                    data['raw_tender'][key] = value.isoformat()
+        
+        return data
 
 
 class NormalizationOutput(BaseModel):
