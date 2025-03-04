@@ -106,36 +106,6 @@ def format_title(title: str) -> str:
     
     return title.strip()
 
-def clean_url(url: str) -> str:
-    """
-    Clean a URL by removing @ prefix and any appended text.
-    
-    Args:
-        url: The URL to clean
-        
-    Returns:
-        Cleaned URL
-    """
-    if not url or not isinstance(url, str):
-        return url
-    
-    # Remove @ prefix if present
-    if url.startswith('@'):
-        url = url[1:]
-    
-    # Remove trailing punctuation
-    if url and url[-1] in '.,;:)]}':
-        url = url[:-1]
-    
-    # Clean up URLs with appended text (look for domain endings)
-    # This regex finds the valid part of the URL ending at a valid TLD
-    valid_url_pattern = re.compile(r'(https?://[^/]+(?:/[^/\s]*)*)')
-    valid_parts = valid_url_pattern.findall(url)
-    if valid_parts:
-        url = valid_parts[0]
-    
-    return url.strip()
-
 def extract_urls_from_text(text: str) -> List[str]:
     """
     Extract URLs from text content.
@@ -151,30 +121,18 @@ def extract_urls_from_text(text: str) -> List[str]:
     
     # Regular expression to find URLs in text
     url_pattern = re.compile(
-        r'(?:@)?http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     )
     
     # Find all matches
     urls = url_pattern.findall(text)
     
-    # Clean up URLs (remove prefixes, suffixes, and trailing punctuation)
+    # Clean up URLs (remove trailing punctuation)
     clean_urls = []
     for url in urls:
-        # Remove @ prefix if present
-        if url.startswith('@'):
-            url = url[1:]
-        
         # Remove trailing punctuation
         if url and url[-1] in '.,;:)]}':
             url = url[:-1]
-            
-        # Clean up URLs with appended text (look for domain endings)
-        # This regex finds the valid part of the URL ending at a valid TLD
-        valid_url_pattern = re.compile(r'(https?://[^/]+(?:/[^/\s]*)*)')
-        valid_parts = valid_url_pattern.findall(url)
-        if valid_parts:
-            url = valid_parts[0]
-            
         if url:
             clean_urls.append(url)
     
@@ -498,27 +456,57 @@ class TenderNormalizer:
             # Create a run context (will be passed to the agent)
             context = None
             try:
-                # Even more simplified initialization for pydantic-ai 0.0.31
-                # Remove the provider parameter which is causing the error
+                # Try the version that should be installed in Docker (0.0.31)
+                logger.debug("Trying to create RunContext with version 0.0.31 signature")
                 context = RunContext(
-                    model=settings.openai_model
+                    system_prompt=self._get_system_prompt(),
+                    model=settings.openai_model,
+                    provider="openai"
                 )
-                logger.info(f"Successfully created RunContext with model {settings.openai_model}")
-            except Exception as e:
-                logger.error(f"Failed to create RunContext: {str(e)}")
-                logger.warning("Will attempt to normalize using fallback method only")
+            except (TypeError, ValueError) as e:
+                logger.warning(f"Error creating RunContext with system_prompt/model/provider: {str(e)}")
+                try:
+                    # Try newer pydantic-ai API
+                    logger.debug("Trying to create RunContext with newer API")
+                    context = RunContext(model="mistral")
+                except TypeError:
+                    # Try older pydantic-ai API
+                    try:
+                        logger.debug("Trying to create RunContext with older API")
+                        context = RunContext(
+                            deps={},
+                            model="mistral", 
+                            usage={},
+                            prompt=self._get_system_prompt()
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error creating RunContext with deps/model/usage/prompt: {str(e)}")
+                        # Last resort fallback
+                        try:
+                            logger.debug("Trying to create basic RunContext")
+                            context = RunContext()
+                        except Exception as e:
+                            logger.error(f"All attempts to create RunContext failed: {str(e)}")
             
             # Run the normalization
             if context is not None:
                 try:
-                    # Use the context parameter as expected in version 0.0.31
+                    # First try with context
+                    logger.debug("Attempting agent.run with context parameter")
                     result = await self.agent.run(input_data, context=context)
-                except Exception as e:
-                    logger.error(f"LLM normalization failed: {str(e)}")
-                    return await self._normalize_with_fallback(tender, f"LLM error: {str(e)}", start_time)
+                except TypeError:
+                    # If that fails, try with the context as system_prompt
+                    try:
+                        logger.debug("Attempting agent.run with system_prompt parameter")
+                        result = await self.agent.run(input_data, system_prompt=self._get_system_prompt())
+                    except TypeError:
+                        # Last resort, try without context parameter
+                        logger.debug("Attempting agent.run without extra parameters")
+                        result = await self.agent.run(input_data)
             else:
-                # No context could be created, use fallback
-                return await self._normalize_with_fallback(tender, "Failed to create RunContext", start_time)
+                # No context could be created, try running without it
+                logger.warning("Running agent without context due to previous errors")
+                result = await self.agent.run(input_data)
             
             output = NormalizationOutput.model_validate(result)
             
@@ -951,113 +939,70 @@ class TenderNormalizer:
             
             # Handle URL fields - Check all possible URL field names, but prioritize source-specific ones
             url_found = False
-            source_url_found = False  # Flag to track if we found an official source platform URL
             
-            # First check the source-specific primary URL fields (which are ordered by priority)
-            source_url_fields = self._get_url_fields_for_source(tender.source_table)
+            # First check the source-specific primary URL field
+            primary_url_field = source_url_fields[0] if source_url_fields else None
             
-            # Try to find the primary source platform URL
-            for url_field in source_url_fields[:2]:  # Check the top 2 priority fields for this source
-                url_value = getattr(tender, url_field, None)
+            if primary_url_field:
+                # Check direct attribute
+                url_value = getattr(tender, primary_url_field, None)
                 if url_value is None and hasattr(tender, "source_data") and tender.source_data:
-                    url_value = tender.source_data.get(url_field)
+                    url_value = tender.source_data.get(primary_url_field)
                 
                 if url_value and str(url_value).strip():
-                    clean_url_value = clean_url(str(url_value))
-                    normalized_data["url"] = clean_url_value
-                    # Also save as source_url to clearly indicate this is the official source platform URL
-                    normalized_data["source_url"] = clean_url_value
+                    normalized_data["url"] = str(url_value).strip()
+                    url_found = True
+                    logger.info(f"Found primary URL from field {primary_url_field}: {url_value}")
+            
+            # If no primary URL found, check other URL fields
+            if not url_found:
+                # For SAM.gov, try to construct URL from opportunity_id before checking other fields
+                if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id") and tender.opportunity_id:
+                    opportunity_id = tender.opportunity_id
+                    # Construct the SAM.gov URL
+                    constructed_url = f"https://sam.gov/opp/{opportunity_id}/view"
+                    normalized_data["url"] = constructed_url
+                    normalized_data["source_url"] = constructed_url  # This is the official source URL
                     url_found = True
                     source_url_found = True
-                    logger.info(f"Found official source platform URL from field {url_field}: {clean_url_value}")
-                    break  # Stop after finding the highest priority source URL
-            
-            # If no primary source URL found, check other URL fields
-            if not url_found:
-                for url_field in source_url_fields[2:]:  # Check remaining URL fields
-                    # Check for the field in normalized data
-                    if url_field in normalized_data and normalized_data[url_field]:
-                        clean_url_value = clean_url(normalized_data[url_field])
-                        normalized_data["url"] = clean_url_value
-                        url_found = True
-                        logger.info(f"Found URL from field {url_field}: {clean_url_value}")
-                        break
-                    
-                    # Check tender attributes and source_data
-                    url_value = getattr(tender, url_field, None)
-                    if url_value is None and hasattr(tender, "source_data") and tender.source_data:
-                        url_value = tender.source_data.get(url_field)
-                    
-                    if url_value and str(url_value).strip():
-                        clean_url_value = clean_url(str(url_value))
-                        normalized_data["url"] = clean_url_value
-                        url_found = True
-                        logger.info(f"Found URL from field {url_field}: {clean_url_value}")
-                        break
-            
-            # If we found a URL but not an official source URL, check if it matches the source domain
-            if url_found and not source_url_found and "url" in normalized_data:
-                # Map of source tables to their official domains
-                source_domains = {
-                    "aiib": "aiib.org",
-                    "adb": "adb.org",
-                    "wb": "worldbank.org",
-                    "afdb": "afdb.org",
-                    "ted_eu": "ted.europa.eu",
-                    "ungm": "ungm.org",
-                    "sam_gov": "sam.gov"
-                }
-                
-                # Check if URL contains the official domain for this source
-                domain = source_domains.get(tender.source_table)
-                if domain and domain in normalized_data["url"]:
-                    normalized_data["source_url"] = normalized_data["url"]
-                    source_url_found = True
-                    logger.info(f"Recognized official {tender.source_table} URL by domain: {normalized_data['url']}")
-            
-            # If we found a URL but not an official source URL, collect all other URLs as document_links
-            for url_field in source_url_fields:
-                # Skip the field we already used for the main URL
-                if url_found and url_field in normalized_data and normalized_data.get("url") == normalized_data.get(url_field):
-                    continue
-                
-                # Check for additional URLs in normalized data
-                if url_field in normalized_data and normalized_data[url_field]:
-                    normalized_data.setdefault("document_links", [])
-                    normalized_data["document_links"].append({"url": clean_url(normalized_data[url_field])})
-                
-                # Check tender attributes and source_data for additional URLs
-                url_value = getattr(tender, url_field, None)
-                if url_value is None and hasattr(tender, "source_data") and tender.source_data:
-                    url_value = tender.source_data.get(url_field)
-                
-                if url_value and str(url_value).strip():
-                    # Skip if this is already our main URL
-                    if url_found and normalized_data.get("url") == clean_url(str(url_value)):
-                        continue
-                    
-                    normalized_data.setdefault("document_links", [])
-                    normalized_data["document_links"].append({"url": clean_url(str(url_value))})
+                    logger.info(f"Constructed official SAM.gov URL from opportunity_id: {constructed_url}")
+                else:
+                    for url_field in source_url_fields[2:]:  # Check remaining URL fields
+                        if url_field in tender_dict and tender_dict[url_field]:
+                            normalized_data["url"] = tender_dict[url_field]
+                            url_found = True
+                            logger.info(f"Found URL from field {url_field}: {tender_dict[url_field]}")
+                            break
             
             # Extract URLs from description and other text fields ONLY as a last resort fallback
-            if not url_found and "description" in normalized_data and normalized_data["description"]:
-                urls = extract_urls_from_text(normalized_data["description"])
-                if urls:
-                    normalized_data["url"] = urls[0]
+            if not url_found:
+                # For SAM.gov, try to construct URL from opportunity_id before extracting from description
+                if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id") and tender.opportunity_id:
+                    opportunity_id = tender.opportunity_id
+                    # Construct the SAM.gov URL
+                    constructed_url = f"https://sam.gov/opp/{opportunity_id}/view"
+                    normalized_data["url"] = constructed_url
+                    normalized_data["source_url"] = constructed_url  # This is the official source URL
                     url_found = True
-                    logger.info(f"Extracted URL from description as last resort: {urls[0]}")
-                    
-                    # Add remaining URLs as document links
-                    if len(urls) > 1:
-                        normalized_data.setdefault("document_links", [])
-                        for url in urls[1:]:
-                            normalized_data["document_links"].append({"url": url})
+                    source_url_found = True
+                    logger.info(f"Constructed official SAM.gov URL from opportunity_id: {constructed_url}")
+                # Only extract from description if we couldn't construct an official URL
+                elif "description" in normalized_data and normalized_data["description"]:
+                    urls = extract_urls_from_text(normalized_data["description"])
+                    if urls:
+                        normalized_data["url"] = urls[0]
+                        url_found = True
+                        logger.info(f"Extracted URL from description as last resort: {urls[0]}")
+                        
+                        # Add remaining URLs as document links
+                        if len(urls) > 1:
+                            normalized_data.setdefault("document_links", [])
+                            for url in urls[1:]:
+                                normalized_data["document_links"].append({"url": url})
             
             # Log if no URL was found
             if not url_found:
                 logger.warning(f"No URL found for tender {tender.id} from {tender.source_table}")
-            elif not source_url_found:
-                logger.warning(f"No official source platform URL found for tender {tender.id} from {tender.source_table}, using alternative URL")
             
             # Handle document links
             documents = []
@@ -1115,40 +1060,6 @@ class TenderNormalizer:
                     contact_info["email"] = emails[0]
                     normalized_data["contact_email"] = emails[0]
                     logger.info(f"Extracted email from description: {emails[0]}")
-            
-            # For AIIB and other tenders, also check pdf_content for contact information
-            if "email" not in contact_info and tender.source_table in ["aiib", "afdb", "adb"]:
-                # Check if pdf_content exists in the raw data
-                pdf_content = getattr(tender, "pdf_content", None)
-                if pdf_content and isinstance(pdf_content, str):
-                    # Extract emails from PDF content
-                    emails = extract_emails_from_text(pdf_content)
-                    if emails:
-                        contact_info["email"] = emails[0]
-                        normalized_data["contact_email"] = emails[0]
-                        logger.info(f"Extracted email from pdf_content: {emails[0]}")
-                        
-                        # Look for contact name near the email
-                        # Common patterns like "contact: Name (email@example.com)" or "email: email@example.com"
-                        email_context = pdf_content.split(emails[0], 1)[0]  # Get text before the email
-                        last_lines = email_context.split('\n')[-3:]  # Get last few lines before email
-                        
-                        # Join the lines and look for contact indicators
-                        context_text = ' '.join(last_lines)
-                        contact_indicators = ["contact", "email", "inquiries", "information", "correspondence"]
-                        
-                        for indicator in contact_indicators:
-                            if indicator.lower() in context_text.lower():
-                                # Extract potential name (text between indicator and email)
-                                pattern = re.compile(f"{indicator}[s]?[:\\s]+(.*)", re.IGNORECASE)
-                                match = pattern.search(context_text)
-                                if match and match.group(1) and len(match.group(1)) < 100:  # Reasonable name length
-                                    potential_name = match.group(1).strip()
-                                    if potential_name and "email" not in potential_name.lower():
-                                        contact_info["name"] = potential_name
-                                        normalized_data["contact_name"] = potential_name
-                                        logger.info(f"Extracted contact name from pdf_content: {potential_name}")
-                                        break
             
             # If we have any contact info, add it in both formats
             if contact_info:
@@ -1215,12 +1126,9 @@ class TenderNormalizer:
             
             # If URL is still missing, try to construct it for specific sources
             if "url" not in normalized_data or not normalized_data["url"]:
-                # For SAM.gov, construct URL from opportunity_id
-                if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id"):
-                    opportunity_id = tender.opportunity_id
-                    # Construct the SAM.gov URL
-                    normalized_data["url"] = f"https://sam.gov/opp/{opportunity_id}/view"
-                    logger.info(f"Constructed SAM.gov URL from opportunity_id: {normalized_data['url']}")
+                # This code has been moved earlier in the function to prioritize construction of SAM.gov URLs
+                # before falling back to extracting URLs from description
+                pass
             
             # Ensure all critical fields are present
             self._ensure_critical_fields(normalized_data, tender)
@@ -1958,32 +1866,25 @@ class TenderNormalizer:
         return results_by_source
     
     def _get_url_fields_for_source(self, source_table: str) -> List[str]:
-        """
-        Get URL field names for a specific source table.
-        Returns a list of field names, with official source platform URL fields first.
-        """
-        # Source-specific primary URL fields (official source platform URLs)
-        # These are the most important URLs to preserve as they link back to the original tender
-        source_primary_fields = {
-            "sam_gov": ["beta_url", "solicitation_link", "opportunity_link"],  # beta_url is the official SAM.gov URL
-            "wb": ["notice_url", "link"],  # World Bank official notice URL
-            "adb": ["link", "notice_url"],  # ADB official tender notice URL
-            "ted_eu": ["notice_url", "tender_url"],  # TED EU official notice URL
-            "ungm": ["link", "notice_url"],  # UNGM official tender link
-            "afd_tenders": ["notice_url", "link"],  # AFD official notice URL
-            "iadb": ["link", "project_url"],  # IADB official project/tender link
-            "afdb": ["tender_url", "link"],  # AfDB official tender URL
-            "aiib": ["url", "link", "notice_url"]  # AIIB URLs can be in url or link fields
+        """Get URL field names for a specific source table."""
+        # Base URL fields to check in all sources
+        base_fields = ["url", "link", "web_link"]
+        
+        # Source-specific URL fields
+        source_fields = {
+            "sam_gov": ["solicitation_link", "opportunity_link"],
+            "wb": ["link"],
+            "adb": ["link"],
+            "ted_eu": ["notice_url"],
+            "ungm": ["link"],
+            "afd_tenders": ["notice_url"],
+            "iadb": ["link"],
+            "afdb": ["tender_url"],
+            "aiib": ["link"]
         }
         
-        # Secondary URL fields - these might contain related but not primary URLs
-        secondary_fields = ["web_link", "document_url", "related_link"]
-        
-        # Get the primary fields for this source, or use an empty list if not found
-        primary_fields = source_primary_fields.get(source_table, [])
-        
-        # Return primary fields first (most important), then secondary fields
-        return primary_fields + secondary_fields
+        # Combine base fields with source-specific fields
+        return base_fields + source_fields.get(source_table, [])
 
     def _map_standard_tender_type(self, normalized_data: Dict[str, Any], tender: RawTender) -> None:
         """
