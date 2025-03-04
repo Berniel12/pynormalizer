@@ -456,10 +456,8 @@ class TenderNormalizer:
             # Create a run context (will be passed to the agent)
             context = None
             try:
-                # Use the correct API for version 0.0.31
-                logger.debug("Creating RunContext with version 0.0.31")
+                # Simplified initialization for pydantic-ai 0.0.31
                 context = RunContext(
-                    system_prompt=self._get_system_prompt(),
                     model=settings.openai_model,
                     provider="openai"
                 )
@@ -471,22 +469,14 @@ class TenderNormalizer:
             # Run the normalization
             if context is not None:
                 try:
-                    # First try with context
-                    logger.debug("Attempting agent.run with context parameter")
+                    # Use the context parameter as expected in version 0.0.31
                     result = await self.agent.run(input_data, context=context)
-                except TypeError:
-                    # If that fails, try with the context as system_prompt
-                    try:
-                        logger.debug("Attempting agent.run with system_prompt parameter")
-                        result = await self.agent.run(input_data, system_prompt=self._get_system_prompt())
-                    except TypeError:
-                        # Last resort, try without context parameter
-                        logger.debug("Attempting agent.run without extra parameters")
-                        result = await self.agent.run(input_data)
+                except Exception as e:
+                    logger.error(f"LLM normalization failed: {str(e)}")
+                    return await self._normalize_with_fallback(tender, f"LLM error: {str(e)}", start_time)
             else:
-                # No context could be created, try running without it
-                logger.warning("Running agent without context due to previous errors")
-                result = await self.agent.run(input_data)
+                # No context could be created, use fallback
+                return await self._normalize_with_fallback(tender, "Failed to create RunContext", start_time)
             
             output = NormalizationOutput.model_validate(result)
             
