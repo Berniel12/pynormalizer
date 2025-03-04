@@ -698,9 +698,9 @@ class TenderNormalizer:
                     "contact_email": "point_of_contact_email",
                     "contact_phone": "point_of_contact_phone",
                     "publication_date": "posted_date",
-                    "deadline_date": "response_deadline",
+                    "deadline_date": "response_date",
                     "status": "archive_type", 
-                    "url": "solicitation_link",
+                    "url": "beta_url",  # Try using beta_url for SAM.gov tenders
                     "source_id": "opportunity_id",
                 },
                 "wb": {
@@ -1085,11 +1085,50 @@ class TenderNormalizer:
             # Ensure all critical fields are present
             self._ensure_critical_fields(normalized_data, tender)
             
+            # Process source-specific contacts array for SAM.gov
+            if tender.source_table == "sam_gov" and hasattr(tender, "contacts") and tender.contacts:
+                contacts = tender.contacts
+                if isinstance(contacts, list) and contacts:
+                    # Use the primary contact if available
+                    primary_contact = None
+                    for contact in contacts:
+                        if isinstance(contact, dict) and contact.get("contact_type") == "primary":
+                            primary_contact = contact
+                            break
+                    
+                    # If no primary contact, use the first one
+                    if not primary_contact and contacts:
+                        primary_contact = contacts[0]
+                    
+                    # Extract contact info
+                    if primary_contact:
+                        if "full_name" in primary_contact and primary_contact["full_name"]:
+                            normalized_data["contact_name"] = primary_contact["full_name"]
+                        if "email" in primary_contact and primary_contact["email"]:
+                            normalized_data["contact_email"] = primary_contact["email"]
+                        if "phone" in primary_contact and primary_contact["phone"]:
+                            normalized_data["contact_phone"] = primary_contact["phone"]
+                        
+                        # Log that we found contact info from the contacts array
+                        logger.info(f"Extracted contact info from contacts array: {primary_contact}")
+            
             # Standardize tender_type to match our schema
             self._map_standard_tender_type(normalized_data, tender)
             
             # Ensure status is valid - map any non-standard values to valid ones
             self._ensure_valid_status(normalized_data)
+            
+            # If URL is still missing, try to construct it for specific sources
+            if "url" not in normalized_data or not normalized_data["url"]:
+                # For SAM.gov, construct URL from opportunity_id
+                if tender.source_table == "sam_gov" and hasattr(tender, "opportunity_id"):
+                    opportunity_id = tender.opportunity_id
+                    # Construct the SAM.gov URL
+                    normalized_data["url"] = f"https://sam.gov/opp/{opportunity_id}/view"
+                    logger.info(f"Constructed SAM.gov URL from opportunity_id: {normalized_data['url']}")
+            
+            # Ensure all critical fields are present
+            self._ensure_critical_fields(normalized_data, tender)
             
             # Log quality check
             log_quality_check(tender.id, tender.source_table, tender_dict, normalized_data)
@@ -1643,12 +1682,12 @@ class TenderNormalizer:
                 for field in ["title", "description", "organization_name"]:
                     if field in tender_dict and tender_dict[field]:
                         # Look for URLs in text
-                        urls = self._extract_urls_from_text(tender_dict[field])
+                        urls = extract_urls_from_text(tender_dict[field])
                         if urls:
                             analysis_logger.info(f"{tender_log_prefix} URLS FOUND IN {field}: {urls}")
                         
                         # Look for email addresses
-                        emails = self._extract_emails_from_text(tender_dict[field])
+                        emails = extract_emails_from_text(tender_dict[field])
                         if emails:
                             analysis_logger.info(f"{tender_log_prefix} EMAILS FOUND IN {field}: {emails}")
                         
@@ -1735,7 +1774,7 @@ class TenderNormalizer:
                         # Log possible URLs from text if no URL was extracted
                         for field in ["title", "description", "organization_name"]:
                             if field in tender_dict and tender_dict[field]:
-                                urls = self._extract_urls_from_text(tender_dict[field])
+                                urls = extract_urls_from_text(tender_dict[field])
                                 if urls:
                                     analysis_logger.info(f"{tender_log_prefix} MISSED URLS IN {field}: {urls}")
                     
@@ -1751,7 +1790,7 @@ class TenderNormalizer:
                         
                         # Check if contact information might be in the description
                         if "description" in tender_dict and tender_dict["description"]:
-                            emails = self._extract_emails_from_text(tender_dict["description"])
+                            emails = extract_emails_from_text(tender_dict["description"])
                             if emails:
                                 analysis_logger.info(f"{tender_log_prefix} MISSED EMAILS IN DESCRIPTION: {emails}")
                     
