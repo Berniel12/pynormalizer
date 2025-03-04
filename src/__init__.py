@@ -1,0 +1,3 @@
+"""
+Tender Normalizer Python implementation.
+""" 

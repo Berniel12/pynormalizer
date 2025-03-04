@@ -1,0 +1,64 @@
+{
+  "name": "tender-normalizer-py",
+  "version": "0.1.0",
+  "buildTag": "latest",
+  "env": {
+    "OPENAI_API_KEY": "{{OPENAI_API_KEY}}",
+    "SUPABASE_URL": "{{SUPABASE_URL}}",
+    "SUPABASE_KEY": "{{SUPABASE_KEY}}",
+    "LOGFIRE_TOKEN": "{{LOGFIRE_TOKEN}}",
+    "USE_LLM_NORMALIZATION": "true",
+    "LLM_TIMEOUT_SECONDS": "60",
+    "BATCH_SIZE": "25",
+    "CONCURRENT_REQUESTS": "5"
+  },
+  "environmentVariables": {
+    "SUPABASE_URL": {
+      "name": "SUPABASE_URL",
+      "value": "",
+      "isSecret": false,
+      "description": "URL of your Supabase instance"
+    },
+    "SUPABASE_KEY": {
+      "name": "SUPABASE_KEY",
+      "value": "",
+      "isSecret": true,
+      "description": "Service key for your Supabase instance"
+    },
+    "OPENAI_API_KEY": {
+      "name": "OPENAI_API_KEY",
+      "value": "",
+      "isSecret": true,
+      "description": "API key for OpenAI"
+    },
+    "LOGFIRE_TOKEN": {
+      "name": "LOGFIRE_TOKEN",
+      "value": "",
+      "isSecret": true,
+      "description": "Token for Logfire monitoring (optional)"
+    }
+  },
+  "input": {
+    "title": "Tender Normalizer (Python)",
+    "description": "Normalize tenders from various sources using Pydantic and PydanticAI",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+      "sourceName": {
+        "title": "Source Name",
+        "type": "string",
+        "description": "Name of the source to process (e.g., sam_gov). Leave empty to process all sources.",
+        "editor": "textfield"
+      },
+      "limit": {
+        "title": "Limit",
+        "type": "integer",
+        "description": "Maximum number of tenders to process per source",
+        "default": 25,
+        "editor": "number"
+      }
+    },
+    "required": []
+  },
+  "dockerfile": "./Dockerfile"
+} 
