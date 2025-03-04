@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, TypeVar, Union
 from langdetect import detect
 from pydantic import BaseModel, Field, ValidationError
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.agent import AgentError
+from pydantic_ai.agent.exceptions import AgentError
 
 from ..config import normalizer_config, settings
 from ..models.tender import (
