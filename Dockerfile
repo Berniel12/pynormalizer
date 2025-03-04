@@ -8,6 +8,7 @@ COPY pyproject.toml .
 
 # Install dependencies
 RUN pip install --no-cache-dir pip==24.0 setuptools==69.1.0 wheel==0.42.0
+RUN pip install --no-cache-dir pydantic-ai==0.0.31
 RUN pip install --no-cache-dir .
 
 # Copy project files

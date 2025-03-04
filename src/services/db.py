@@ -3,9 +3,11 @@ Database service for connecting to Supabase.
 """
 import logging
 from typing import Any, Dict, List, Optional
+import uuid
 
 import asyncpg
 from supabase import Client, create_client
+from pydantic import ValidationError
 
 from ..config import settings
 from ..models.tender import NormalizedTender, RawTender
@@ -57,9 +59,26 @@ class SupabaseClient:
             # Add source_table to each tender
             for tender in response.data:
                 tender["source_table"] = source_table
+                
+                # Map different ID fields based on the source table
+                if source_table == "sam_gov" and "opportunity_id" in tender:
+                    tender["id"] = str(tender["opportunity_id"])
+                elif source_table == "iadb" and "project_number" in tender:
+                    tender["id"] = str(tender["project_number"])
+                elif "id" in tender:
+                    # Convert numeric IDs to strings
+                    tender["id"] = str(tender["id"])
+                else:
+                    # If no ID field could be found, generate one
+                    logger.warning(f"No ID field found for {source_table} tender, generating UUID")
+                    tender["id"] = f"{source_table}-{uuid.uuid4()}"
             
             # Convert to Pydantic models
-            return [RawTender.model_validate(tender) for tender in response.data]
+            try:
+                return [RawTender.model_validate(tender) for tender in response.data]
+            except ValidationError as e:
+                logger.error(f"Validation error for {source_table}: {str(e)}")
+                return []
         
         return []
 

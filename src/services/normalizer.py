@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Dict, List, Optional, TypeVar, Union
 
 from langdetect import detect
@@ -169,8 +169,15 @@ class TenderNormalizer:
                 source_table=tender.source_table,
             )
             
-            context = RunContext(timeout=settings.llm_timeout_seconds)
-            result = await self.agent.run(normalization_input, context=context)
+            try:
+                # Try with timeout parameter first (newer versions)
+                context = RunContext(timeout=settings.llm_timeout_seconds)
+                result = await self.agent.run(normalization_input, context=context)
+            except TypeError:
+                # Fall back to using without timeout (older versions)
+                logger.info("RunContext does not support timeout, using without timeout")
+                context = RunContext()
+                result = await self.agent.run(normalization_input, context=context)
             
             # Create normalized tender model
             normalized_data = result.tender
@@ -248,10 +255,73 @@ class TenderNormalizer:
                 "description_english", "organization_name_english", "language",
             ]
             
+            # Add source-specific field mappings
+            source_specific_mappings = {
+                "sam_gov": {
+                    "title": "opportunity_title",
+                    "description": "description",
+                    "country": "place_of_performance.country_name" if hasattr(tender, "place_of_performance") else None,
+                    "organization_name": "organization_name",
+                },
+                "wb": {
+                    "title": "title",
+                    "description": "description",
+                    "country": "country",
+                    "organization_name": "contact_organization",
+                },
+                "adb": {
+                    "title": "notice_title",
+                    "description": "description",
+                    "country": "country",
+                },
+                "ted_eu": {
+                    "title": "title",
+                    "description": "summary",
+                    "organization_name": "organisation_name",
+                },
+                "ungm": {
+                    "title": "title",
+                    "description": "description",
+                    "country": "beneficiary_countries",
+                },
+                "afd_tenders": {
+                    "title": "notice_title",
+                    "description": "notice_content",
+                    "country": "country",
+                    "organization_name": "buyer",
+                },
+                "iadb": {
+                    "title": "notice_title",
+                    "description": "project_name",
+                    "country": "country",
+                },
+                "afdb": {
+                    "title": "title",
+                    "description": "description",
+                    "country": "country",
+                },
+                "aiib": {
+                    "title": "project_notice",
+                    "description": "project_notice",
+                    "country": "member",
+                }
+            }
+            
+            # Apply source-specific mappings first
+            if tender.source_table in source_specific_mappings:
+                mappings = source_specific_mappings[tender.source_table]
+                for norm_field, source_field in mappings.items():
+                    if source_field and hasattr(tender, source_field):
+                        value = getattr(tender, source_field, None)
+                        if value and str(value).strip():
+                            normalized_data[norm_field] = value
+            
+            # Then apply direct mappings for any fields not already mapped
             for field in direct_field_mappings:
-                value = getattr(tender, field, None)
-                if value and str(value).strip():
-                    normalized_data[field] = value
+                if field not in normalized_data:
+                    value = getattr(tender, field, None)
+                    if value and str(value).strip():
+                        normalized_data[field] = value
             
             # Handle special fields
             # URL
