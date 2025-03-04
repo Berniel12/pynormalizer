@@ -10,6 +10,7 @@ import string
 import time
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional, TypeVar, Union
+import pprint
 
 from langdetect import detect, LangDetectException
 from deep_translator import GoogleTranslator
@@ -26,6 +27,14 @@ from ..models.tender import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Set up a dedicated logger for quality control
+quality_logger = logging.getLogger("tender_quality")
+quality_handler = logging.FileHandler("tender_quality.log")
+quality_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+quality_logger.addHandler(quality_handler)
+quality_logger.setLevel(logging.INFO)
+quality_logger.propagate = False  # Don't propagate to root logger
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -96,6 +105,103 @@ def format_title(title: str) -> str:
     title = re.sub(r'[\-_]{2,}', '-', title)  # Replace multiple hyphens with single
     
     return title.strip()
+
+def extract_urls_from_text(text: str) -> List[str]:
+    """
+    Extract URLs from text content.
+    
+    Args:
+        text: The text to search for URLs
+        
+    Returns:
+        List of URLs found in the text
+    """
+    if not text or not isinstance(text, str):
+        return []
+    
+    # Regular expression to find URLs in text
+    url_pattern = re.compile(
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+    )
+    
+    # Find all matches
+    urls = url_pattern.findall(text)
+    
+    # Clean up URLs (remove trailing punctuation)
+    clean_urls = []
+    for url in urls:
+        # Remove trailing punctuation
+        if url and url[-1] in '.,;:)]}':
+            url = url[:-1]
+        if url:
+            clean_urls.append(url)
+    
+    return clean_urls
+
+def extract_emails_from_text(text: str) -> List[str]:
+    """
+    Extract email addresses from text content.
+    
+    Args:
+        text: The text to search for email addresses
+        
+    Returns:
+        List of email addresses found in the text
+    """
+    if not text or not isinstance(text, str):
+        return []
+    
+    # Regular expression to find email addresses in text
+    email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    
+    # Find all matches
+    emails = email_pattern.findall(text)
+    
+    return emails
+
+def log_quality_check(tender_id: str, source_table: str, raw_data: Dict[str, Any], normalized_data: Dict[str, Any]) -> None:
+    """
+    Log detailed information about the normalization process for quality checking.
+    
+    Args:
+        tender_id: The ID of the tender
+        source_table: The source table of the tender
+        raw_data: The original raw data
+        normalized_data: The normalized data
+    """
+    # Create a formatted comparison for logging
+    quality_data = {
+        "tender_id": tender_id,
+        "source_table": source_table,
+        "timestamp": datetime.utcnow().isoformat(),
+        "raw_fields_count": len(raw_data) if raw_data else 0,
+        "normalized_fields_count": len(normalized_data) if normalized_data else 0,
+        "missing_critical_fields": [],
+        "field_comparison": {}
+    }
+    
+    # Define critical fields to check
+    critical_fields = [
+        "title", "description", "url", "contact_name", "contact_email",
+        "contact_phone", "publication_date", "deadline_date"
+    ]
+    
+    # Check for missing critical fields
+    for field in critical_fields:
+        if field not in normalized_data or not normalized_data.get(field):
+            quality_data["missing_critical_fields"].append(field)
+    
+    # Add field comparison
+    for field in normalized_data:
+        quality_data["field_comparison"][field] = {
+            "normalized_value": normalized_data.get(field),
+            "found_in_raw": field in raw_data,
+            "raw_value": raw_data.get(field) if field in raw_data else None
+        }
+    
+    # Log the quality data
+    quality_logger.info(f"QUALITY CHECK FOR {source_table}:{tender_id}\n" + 
+                      pprint.pformat(quality_data, width=120, compact=False))
 
 class NormalizationInput(BaseModel):
     """
@@ -271,6 +377,9 @@ class TenderNormalizer:
         3. Clean up excessive numbers and codes from titles while preserving essential information.
         4. Remove excessive punctuation and special characters from all text fields.
         5. If text appears to be in a language other than English, note this in the 'language' field.
+        6. EXTREMELY IMPORTANT: Look for URLs in ALL fields, especially description fields and source_data. Extract any URLs found and include them in the url field.
+        7. EXTREMELY IMPORTANT: Look for contact information (email, phone, address) throughout the data and make sure to extract it.
+        8. Check both direct fields and nested fields in source_data for all relevant information.
         
         For each field, always choose the most specific and accurate value from the raw data.
         If a field is not available in the raw data, do not include it in the output.
@@ -377,6 +486,34 @@ class TenderNormalizer:
             if "title" in tender_data and tender_data["title"]:
                 tender_data["title"] = format_title(tender_data["title"])
             
+            # Extract URLs from description and other text fields if not already found
+            if "url" not in tender_data or not tender_data["url"]:
+                # Check description field for URLs
+                if "description" in tender_data and tender_data["description"]:
+                    urls = extract_urls_from_text(tender_data["description"])
+                    if urls:
+                        tender_data["url"] = urls[0]  # Use the first URL
+                        if len(urls) > 1:
+                            tender_data.setdefault("document_links", [])
+                            for url in urls[1:]:
+                                tender_data["document_links"].append({"url": url})
+                
+                # Check all fields for URLs if we still don't have one
+                if "url" not in tender_data or not tender_data["url"]:
+                    for field_name, field_value in tender_dict.items():
+                        if isinstance(field_value, str) and field_name not in ["id", "source_id"]:
+                            urls = extract_urls_from_text(field_value)
+                            if urls:
+                                tender_data["url"] = urls[0]
+                                break
+            
+            # Extract contact information from description if not already found
+            has_contact_info = "contact_name" in tender_data or "contact_email" in tender_data or "contact_phone" in tender_data
+            if not has_contact_info and "description" in tender_data and tender_data["description"]:
+                emails = extract_emails_from_text(tender_data["description"])
+                if emails:
+                    tender_data["contact_email"] = emails[0]
+            
             # Handle language detection and translation
             language = None
             
@@ -417,6 +554,9 @@ class TenderNormalizer:
             # Ensure all critical fields are present
             self._ensure_critical_fields(tender_data, tender)
             
+            # Log quality check data
+            log_quality_check(tender.id, tender.source_table, tender_dict, tender_data)
+            
             # Create the normalized tender
             normalized_tender = NormalizedTender.model_validate(tender_data)
             
@@ -443,28 +583,28 @@ class TenderNormalizer:
             )
             
             self._update_performance_stats(result)
-            
             return result
             
         except Exception as e:
-            logger.error(f"LLM normalization failed for {tender.id}: {str(e)}")
-            logger.info(f"Falling back to rule-based normalization for {tender.id}")
+            logger.error(
+                f"LLM normalization failed for {tender.id} from {tender.source_table}: {str(e)}"
+            )
             
-            # Use the fallback method
+            # Fallback to direct parsing if LLM fails
             return await self._normalize_with_fallback(
-                tender, error=str(e), start_time=start_time
+                tender, f"LLM normalization failed: {str(e)}", start_time
             )
 
     async def _normalize_with_fallback(
         self, tender: RawTender, error: str = "Fallback used", start_time: Optional[float] = None
     ) -> NormalizationResult:
         """
-        Normalize a tender using rule-based fallback methods.
+        Normalize a tender using rule-based fallback when LLM fails.
         
         Args:
             tender: The raw tender to normalize
-            error: Error message that triggered fallback
-            start_time: Start time for processing (if already started)
+            error: The error message from the LLM normalization attempt
+            start_time: Optional start time for performance tracking
             
         Returns:
             Normalization result
@@ -518,6 +658,8 @@ class TenderNormalizer:
                     "publication_date": "posted_date",
                     "deadline_date": "response_deadline",
                     "status": "archive_type", 
+                    "url": "solicitation_link",
+                    "opportunity_link": "opportunity_link",
                 },
                 "wb": {
                     "title": "title",
@@ -536,6 +678,7 @@ class TenderNormalizer:
                     "deadline_date": "deadline",
                     "estimated_value": "contract_value",
                     "currency": "contract_currency",
+                    "url": "link",
                 },
                 "adb": {
                     "title": "notice_title",
@@ -550,6 +693,7 @@ class TenderNormalizer:
                     "buyer": "executing_agency",
                     "publication_date": "published_date",
                     "deadline_date": "closing_date",
+                    "url": "link",
                 },
                 "ted_eu": {
                     "title": "title",
@@ -568,6 +712,7 @@ class TenderNormalizer:
                     "deadline_date": "deadline",
                     "estimated_value": "value_magnitude",
                     "currency": "value_currency",
+                    "url": "notice_url",
                 },
                 "ungm": {
                     "title": "title",
@@ -582,6 +727,7 @@ class TenderNormalizer:
                     "contact_name": "contact_name",
                     "contact_email": "contact_email",
                     "publication_date": "published_date",
+                    "url": "link",
                 },
                 "afd_tenders": {
                     "title": "notice_title",
@@ -594,6 +740,7 @@ class TenderNormalizer:
                     "sector": "sector",
                     "publication_date": "launch_date",
                     "deadline_date": "closure_date",
+                    "url": "notice_url",
                 },
                 "iadb": {
                     "title": "notice_title",
@@ -606,6 +753,7 @@ class TenderNormalizer:
                     "sector": "sector",
                     "publication_date": "published_date",
                     "deadline_date": "deadline_date",
+                    "url": "link",
                 },
                 "afdb": {
                     "title": "title",
@@ -619,6 +767,7 @@ class TenderNormalizer:
                     "buyer": "borrower",
                     "publication_date": "publication_date",
                     "deadline_date": "deadline_date",
+                    "url": "tender_url",
                 },
                 "aiib": {
                     "title": "project_notice",
@@ -631,7 +780,24 @@ class TenderNormalizer:
                     "buyer": "borrower",
                     "publication_date": "publication_date",
                     "deadline_date": "deadline",
+                    "url": "link",
                 }
+            }
+            
+            # Define additional URL field names to check
+            url_field_names = [
+                "url", "link", "web_link", "notice_url", "opportunity_link", "solicitation_link", 
+                "tender_url", "project_url", "document_url", "listing_url", "external_url"
+            ]
+            
+            # Define additional contact field names to check
+            contact_field_names = {
+                "name": ["contact_name", "point_of_contact", "contact_person", "contact", "focal_point", 
+                         "officer_name", "responsible_officer", "respondent"],
+                "email": ["contact_email", "email", "point_of_contact_email", "officer_email", "email_address"],
+                "phone": ["contact_phone", "phone", "phone_number", "telephone", "contact_telephone", 
+                          "tel", "mobile", "officer_phone"],
+                "address": ["contact_address", "address", "postal_address", "mailing_address", "office_address"]
             }
             
             # Apply source-specific mappings first
@@ -709,15 +875,74 @@ class TenderNormalizer:
                     if translated_org != normalized_data["organization_name"]:
                         normalized_data["organization_name_english"] = translated_org
             
-            # Handle URL fields
-            for url_field in ["url", "link", "web_link"]:
-                url_value = getattr(tender, url_field, None)
-                if url_value is None and hasattr(tender, "source_data") and tender.source_data:
-                    url_value = tender.source_data.get(url_field)
+            # Handle URL fields - Check all possible URL field names
+            url_found = False
+            for url_field in url_field_names:
+                if url_field in normalized_data and normalized_data[url_field]:
+                    # If we already have a primary URL but found another one, add it to document_links
+                    if url_found and url_field != "url":
+                        normalized_data.setdefault("document_links", [])
+                        normalized_data["document_links"].append({"url": normalized_data[url_field]})
+                    else:
+                        # Set as primary URL if we don't have one yet
+                        normalized_data["url"] = normalized_data[url_field]
+                        url_found = True
                 
-                if url_value and str(url_value).strip():
-                    normalized_data["url"] = url_value
-                    break
+                # Also check tender attributes and source_data
+                if not url_found or url_field != "url":
+                    url_value = getattr(tender, url_field, None)
+                    if url_value is None and hasattr(tender, "source_data") and tender.source_data:
+                        url_value = tender.source_data.get(url_field)
+                    
+                    if url_value and str(url_value).strip():
+                        if url_found and url_field != "url":
+                            normalized_data.setdefault("document_links", [])
+                            normalized_data["document_links"].append({"url": url_value})
+                        else:
+                            normalized_data["url"] = url_value
+                            url_found = True
+            
+            # Extract URLs from description and other text fields if not already found
+            if not url_found and "description" in normalized_data and normalized_data["description"]:
+                urls = extract_urls_from_text(normalized_data["description"])
+                if urls:
+                    normalized_data["url"] = urls[0]  # Use the first URL
+                    url_found = True
+                    
+                    if len(urls) > 1:
+                        normalized_data.setdefault("document_links", [])
+                        for url in urls[1:]:
+                            normalized_data["document_links"].append({"url": url})
+            
+            # If we still don't have a URL, check all string fields
+            if not url_found:
+                for field_name, field_value in tender_dict.items():
+                    if isinstance(field_value, str) and field_name not in ["id", "source_id"]:
+                        urls = extract_urls_from_text(field_value)
+                        if urls:
+                            normalized_data["url"] = urls[0]
+                            url_found = True
+                            
+                            if len(urls) > 1:
+                                normalized_data.setdefault("document_links", [])
+                                for url in urls[1:]:
+                                    normalized_data["document_links"].append({"url": url})
+                            break
+                            
+                # Check nested source_data too
+                if not url_found and hasattr(tender, "source_data") and tender.source_data:
+                    for field_name, field_value in tender.source_data.items():
+                        if isinstance(field_value, str) and field_name not in ["id", "source_id"]:
+                            urls = extract_urls_from_text(field_value)
+                            if urls:
+                                normalized_data["url"] = urls[0]
+                                url_found = True
+                                
+                                if len(urls) > 1:
+                                    normalized_data.setdefault("document_links", [])
+                                    for url in urls[1:]:
+                                        normalized_data["document_links"].append({"url": url})
+                                break
             
             # Handle document links
             documents = []
@@ -736,27 +961,46 @@ class TenderNormalizer:
                     documents.append({"url": doc_links})
             
             if documents:
-                normalized_data["documents"] = documents
+                normalized_data["document_links"] = documents
             
-            # Contact information
-            contact_fields = {
-                "name": ["contact_name", "point_of_contact", "contact_person"],
-                "email": ["contact_email", "email", "point_of_contact_email"],
-                "phone": ["contact_phone", "phone", "telephone", "point_of_contact_phone"],
-                "address": ["contact_address", "address"]
-            }
-            
+            # Contact information - check all possible field names
             contact_info = {}
-            for field, sources in contact_fields.items():
-                for source in sources:
-                    value = getattr(tender, source, None)
-                    if value is None and hasattr(tender, "source_data") and tender.source_data:
-                        value = tender.source_data.get(source)
+            
+            # Try to extract contact info from all available fields using the mappings
+            for contact_type, field_names in contact_field_names.items():
+                for field_name in field_names:
+                    # Try to get from normalized_data first
+                    value = normalized_data.get(field_name)
+                    
+                    # If not found, try attributes
+                    if not value:
+                        value = getattr(tender, field_name, None)
+                    
+                    # If not found, try source_data
+                    if not value and hasattr(tender, "source_data") and tender.source_data:
+                        value = tender.source_data.get(field_name)
                     
                     if value and str(value).strip():
-                        contact_info[field] = value
+                        contact_info[contact_type] = value
+                        # Also set the specific contact field directly
+                        if contact_type == "name":
+                            normalized_data["contact_name"] = value
+                        elif contact_type == "email":
+                            normalized_data["contact_email"] = value
+                        elif contact_type == "phone":
+                            normalized_data["contact_phone"] = value
+                        elif contact_type == "address":
+                            normalized_data["contact_address"] = value
                         break
             
+            # If we still don't have contact email, try to extract from description
+            if "email" not in contact_info and "description" in normalized_data:
+                emails = extract_emails_from_text(normalized_data["description"])
+                if emails:
+                    contact_info["email"] = emails[0]
+                    normalized_data["contact_email"] = emails[0]
+            
+            # If we have any contact info, add it in both formats
             if contact_info:
                 normalized_data["contact"] = contact_info
             
@@ -776,113 +1020,33 @@ class TenderNormalizer:
                     if isinstance(date_value, (datetime, date)):
                         normalized_data[date_field] = date_value
                     elif isinstance(date_value, str):
-                        try:
-                            # Try multiple date formats
-                            for fmt in [
-                                "%Y-%m-%dT%H:%M:%S", 
-                                "%Y-%m-%d %H:%M:%S",
-                                "%Y-%m-%d",
-                                "%d/%m/%Y",
-                                "%m/%d/%Y"
-                            ]:
-                                try:
-                                    parsed_date = datetime.strptime(date_value, fmt)
-                                    normalized_data[date_field] = parsed_date
-                                    break
-                                except ValueError:
-                                    continue
-                            
-                            # If none of the formats worked, try ISO format
-                            if date_field not in normalized_data:
-                                try:
-                                    normalized_data[date_field] = datetime.fromisoformat(
-                                        date_value.replace("Z", "+00:00")
-                                    )
-                                except ValueError:
-                                    # Skip if parsing fails
-                                    pass
-                        except (ValueError, TypeError):
-                            # Skip if parsing fails
-                            pass
+                        parsed_date = self._parse_date(date_value)
+                        if parsed_date:
+                            normalized_data[date_field] = parsed_date
             
-            # Status - convert string to enum
-            status_value = getattr(tender, "status", None)
-            if status_value is None and hasattr(tender, "source_data") and tender.source_data:
-                status_value = tender.source_data.get("status")
+            # Infer status from dates
+            self._infer_status_from_dates(normalized_data)
             
-            if status_value:
-                try:
-                    normalized_data["status"] = TenderStatus(status_value.lower())
-                except (ValueError, TypeError):
-                    # Infer status from dates
-                    self._infer_status_from_dates(normalized_data)
-            else:
-                # Infer status from dates
-                self._infer_status_from_dates(normalized_data)
-            
-            # Tender type - convert string to enum
-            type_value = getattr(tender, "tender_type", None)
-            if type_value is None and hasattr(tender, "source_data") and tender.source_data:
-                type_value = tender.source_data.get("tender_type")
-            
-            if type_value:
-                try:
-                    normalized_data["tender_type"] = TenderType(type_value.lower())
-                except (ValueError, TypeError):
-                    normalized_data["tender_type"] = TenderType.UNKNOWN
-            
-            # Value and currency
-            value = getattr(tender, "value", None)
-            if value is None and hasattr(tender, "source_data") and tender.source_data:
-                value = tender.source_data.get("value")
-            
-            currency = getattr(tender, "currency", None)
-            if currency is None and hasattr(tender, "source_data") and tender.source_data:
-                currency = tender.source_data.get("currency")
-            
-            if value is not None:
-                if isinstance(value, (int, float)):
-                    normalized_data["value"] = float(value)
-                elif isinstance(value, str):
-                    try:
-                        normalized_data["value"] = float(value.replace(",", ""))
-                    except (ValueError, TypeError):
-                        pass
-                elif isinstance(value, dict) and "amount" in value:
-                    normalized_data["value"] = float(value["amount"])
-                    if "currency" in value and not currency:
-                        normalized_data["currency"] = value["currency"]
-            
-            if currency:
-                normalized_data["currency"] = currency
-            
-            # Include original data
-            if hasattr(tender, "source_data") and tender.source_data:
-                normalized_data["source_data"] = tender.source_data
-            
-            # Generate missing critical fields
+            # Ensure all critical fields are present
             self._ensure_critical_fields(normalized_data, tender)
             
-            # Calculate stats
-            processing_time = time.time() - start_time
-            processing_time_ms = int(processing_time * 1000)
+            # Log quality check
+            log_quality_check(tender.id, tender.source_table, tender_dict, normalized_data)
             
-            # Include processing time in milliseconds
-            normalized_data["processing_time_ms"] = processing_time_ms
-            
-            # Create normalized tender model
+            # Create the normalized tender
             normalized_tender = NormalizedTender.model_validate(normalized_data)
             
-            # Calculate stats
-            processing_time = time.time() - start_time
+            # Calculate fields and improvement
             fields_after = self._count_non_empty_fields(normalized_tender.model_dump())
+            processing_time = time.time() - start_time
             improvement = (
                 ((fields_after - fields_before) / fields_before) * 100
                 if fields_before > 0
                 else 0
             )
             
-            return NormalizationResult(
+            # Create the result
+            result = NormalizationResult(
                 tender_id=tender.id,
                 source_table=tender.source_table,
                 success=True,
@@ -894,6 +1058,9 @@ class TenderNormalizer:
                 fields_after=fields_after,
                 improvement_percentage=improvement,
             )
+            
+            self._update_performance_stats(result)
+            return result
             
         except Exception as e:
             logger.error(
