@@ -455,17 +455,34 @@ class TenderNormalizer:
             
             # Create a run context (will be passed to the agent)
             try:
+                # Try newer pydantic-ai API
                 context = RunContext(model="mistral")
             except TypeError:
-                # Fallback if temperature parameter is not supported
+                # Try older pydantic-ai API
                 try:
-                    context = RunContext()
+                    context = RunContext(
+                        deps={},
+                        model="mistral",
+                        usage={},
+                        prompt=self._get_system_prompt()
+                    )
                 except Exception as e:
-                    logger.warning(f"Error creating RunContext: {str(e)}")
-                    context = None
+                    logger.warning(f"Error creating RunContext with deps/model/usage/prompt: {str(e)}")
+                    # Last resort fallback
+                    try:
+                        context = RunContext()
+                    except Exception as e:
+                        logger.warning(f"Error creating basic RunContext: {str(e)}")
+                        context = None
             
             # Run the normalization
-            result = await self.agent.run(input_data, context=context)
+            if context is not None:
+                try:
+                    result = await self.agent.run(input_data, context=context)
+                except TypeError:
+                    # Try older API without context parameter
+                    result = await self.agent.run(input_data)
+            
             output = NormalizationOutput.model_validate(result)
             
             # Save performance data
@@ -1057,6 +1074,10 @@ class TenderNormalizer:
                 else 0
             )
             
+            # After all mappings are done, standardize fields that need normalization
+            # Standardize tender_type to match our schema
+            self._map_standard_tender_type(normalized_data, tender)
+            
             # Create the result
             result = NormalizationResult(
                 tender_id=tender.id,
@@ -1527,6 +1548,85 @@ class TenderNormalizer:
         
         # Combine base fields with source-specific fields
         return base_fields + source_fields.get(source_table, [])
+
+    def _map_standard_tender_type(self, normalized_data: Dict[str, Any], tender: RawTender) -> None:
+        """
+        Map source-specific tender types to standard types accepted by our schema.
+        
+        Args:
+            normalized_data: The normalized data dictionary to update
+            tender: The raw tender with the original data
+        """
+        # Get the current tender type value
+        tender_type = normalized_data.get("tender_type")
+        
+        # Standard mapping dictionary for known tender types
+        standard_type_mapping = {
+            # World Bank specific mappings
+            "Request for Expression of Interest": "consulting",
+            "Expression Of Interest": "consulting",
+            "Contract Award": "other",
+            "Invitation for Bids": "goods",
+            "General Procurement Notice": "other",
+            "Shortlist": "services",
+            "Request for Proposal": "services",
+            "Request for Bids": "goods",
+            "Request for Quotations": "goods",
+            "Procurement Plan": "other",
+            "Prequalification": "other",
+            
+            # Generic mappings that might apply to multiple sources
+            "Supplies": "goods",
+            "Services": "services",
+            "Works": "works",
+            "Consulting": "consulting",
+            "Consultancy": "consulting",
+            "Mixed": "mixed",
+            "Other": "other",
+        }
+        
+        # If we have a tender type, try to map it
+        if tender_type:
+            # Try direct mapping
+            if tender_type.lower() in [t.lower() for t in standard_type_mapping]:
+                # Case-insensitive match
+                for k, v in standard_type_mapping.items():
+                    if k.lower() == tender_type.lower():
+                        normalized_data["tender_type"] = v
+                        return
+            
+            # If tender type contains certain keywords, map accordingly
+            tender_type_lower = tender_type.lower()
+            if any(word in tender_type_lower for word in ["good", "supply", "product", "equipment"]):
+                normalized_data["tender_type"] = "goods"
+            elif any(word in tender_type_lower for word in ["service", "maintenance"]):
+                normalized_data["tender_type"] = "services"
+            elif any(word in tender_type_lower for word in ["work", "construction", "build"]):
+                normalized_data["tender_type"] = "works"
+            elif any(word in tender_type_lower for word in ["consult", "advisory"]):
+                normalized_data["tender_type"] = "consulting"
+            else:
+                # Default to "other" if we can't determine the type
+                normalized_data["tender_type"] = "other"
+        else:
+            # If no tender type, try to infer from other fields
+            description = normalized_data.get("description", "")
+            title = normalized_data.get("title", "")
+            
+            if description or title:
+                combined_text = (description + " " + title).lower()
+                if any(word in combined_text for word in ["good", "supply", "product", "equipment"]):
+                    normalized_data["tender_type"] = "goods"
+                elif any(word in combined_text for word in ["service", "maintenance"]):
+                    normalized_data["tender_type"] = "services"
+                elif any(word in combined_text for word in ["work", "construction", "build"]):
+                    normalized_data["tender_type"] = "works"
+                elif any(word in combined_text for word in ["consult", "advisory"]):
+                    normalized_data["tender_type"] = "consulting"
+                else:
+                    normalized_data["tender_type"] = "unknown"
+            else:
+                normalized_data["tender_type"] = "unknown"
 
 
 # Create a singleton instance
