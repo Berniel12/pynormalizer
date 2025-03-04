@@ -456,10 +456,10 @@ class TenderNormalizer:
             # Create a run context (will be passed to the agent)
             context = None
             try:
-                # Simplified initialization for pydantic-ai 0.0.31
+                # Even more simplified initialization for pydantic-ai 0.0.31
+                # Remove the provider parameter which is causing the error
                 context = RunContext(
-                    model=settings.openai_model,
-                    provider="openai"
+                    model=settings.openai_model
                 )
                 logger.info(f"Successfully created RunContext with model {settings.openai_model}")
             except Exception as e:
