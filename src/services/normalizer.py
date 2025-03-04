@@ -215,16 +215,98 @@ class NormalizationInput(BaseModel):
         ..., description="Source table name (e.g. 'sam_gov', 'wb', etc.)"
     )
 
+    @model_validator(mode="after")
+    def validate_input(self) -> "NormalizationInput":
+        """Validate the input data and ensure critical fields exist."""
+        if not self.raw_tender:
+            # Ensure raw_tender is at least an empty dict, not None
+            self.raw_tender = {}
+        
+        # Ensure critical fields exist (even if empty)
+        critical_fields = ["id", "source_table", "title", "description"]
+        for field in critical_fields:
+            if field not in self.raw_tender:
+                self.raw_tender[field] = ""
+            elif self.raw_tender[field] is None:
+                # Replace None with empty strings for text fields
+                self.raw_tender[field] = ""
+        
+        # Ensure source_table is consistent
+        if "source_table" in self.raw_tender:
+            # Ensure value from the model overrides any value in raw_tender
+            self.raw_tender["source_table"] = self.source_table
+        
+        return self
+
     # Ensure input is serializable for LLM - crucial for pydantic-ai 0.0.31
     def model_dump(self, **kwargs):
         """Ensure complex types are serialized properly for the LLM."""
         data = super().model_dump(**kwargs)
         
-        # Convert any datetime objects to ISO format strings
+        # Deep sanitization of the raw_tender data
         if 'raw_tender' in data and data['raw_tender']:
+            sanitized_tender = {}
             for key, value in data['raw_tender'].items():
+                # Convert datetime objects to ISO format strings
                 if isinstance(value, (datetime, date)):
-                    data['raw_tender'][key] = value.isoformat()
+                    sanitized_tender[key] = value.isoformat()
+                # Convert None values to empty strings for text fields
+                elif value is None and key in ['title', 'description', 'organization_name']:
+                    sanitized_tender[key] = ""
+                # Handle potential problematic types (like custom objects) by converting to string
+                elif not isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                    try:
+                        sanitized_tender[key] = str(value)
+                    except Exception:
+                        sanitized_tender[key] = ""
+                # Handle nested lists and dictionaries
+                elif isinstance(value, dict):
+                    # Recursively sanitize dictionaries
+                    sanitized_dict = {}
+                    for k, v in value.items():
+                        if isinstance(v, (datetime, date)):
+                            sanitized_dict[k] = v.isoformat()
+                        elif not isinstance(v, (str, int, float, bool, list, dict, type(None))):
+                            try:
+                                sanitized_dict[k] = str(v)
+                            except Exception:
+                                sanitized_dict[k] = ""
+                        else:
+                            sanitized_dict[k] = v
+                    sanitized_tender[key] = sanitized_dict
+                elif isinstance(value, list):
+                    # Sanitize lists
+                    sanitized_list = []
+                    for item in value:
+                        if isinstance(item, (datetime, date)):
+                            sanitized_list.append(item.isoformat())
+                        elif isinstance(item, dict):
+                            # Handle dictionary items in lists
+                            sanitized_dict = {}
+                            for k, v in item.items():
+                                if isinstance(v, (datetime, date)):
+                                    sanitized_dict[k] = v.isoformat()
+                                elif not isinstance(v, (str, int, float, bool, list, dict, type(None))):
+                                    try:
+                                        sanitized_dict[k] = str(v)
+                                    except Exception:
+                                        sanitized_dict[k] = ""
+                                else:
+                                    sanitized_dict[k] = v
+                            sanitized_list.append(sanitized_dict)
+                        elif not isinstance(item, (str, int, float, bool, dict, type(None))):
+                            try:
+                                sanitized_list.append(str(item))
+                            except Exception:
+                                sanitized_list.append("")
+                        else:
+                            sanitized_list.append(item)
+                    sanitized_tender[key] = sanitized_list
+                else:
+                    sanitized_tender[key] = value
+            
+            # Replace the original raw_tender with the sanitized version
+            data['raw_tender'] = sanitized_tender
         
         return data
 
@@ -486,55 +568,78 @@ class TenderNormalizer:
                 normalized_data = result.tender
                 missing_fields = result.missing_fields
                 notes = result.notes
-
-                # Essential fields check and fallback if needed
-                self._ensure_critical_fields(normalized_data, tender)
-                
-                # Add URL from raw data if available
-                if url_fields := self._get_url_fields_for_source(tender.source_table):
-                    for field_name in url_fields:
-                        if field_value := getattr(tender, field_name, None):
-                            normalized_data["url"] = field_value
-                            logger.info(f"Found primary URL from field {field_name}: {field_value}")
-                            break
-                
-                # Standardize tender type
-                self._map_standard_tender_type(normalized_data, tender)
-                
-                # Ensure valid status
-                self._ensure_valid_status(normalized_data)
-                
-                # Parse dates to standard format
-                if "publication_date" in normalized_data and normalized_data["publication_date"]:
-                    normalized_data["publication_date"] = self._parse_date(
-                        normalized_data["publication_date"]
-                    )
-                if "deadline_date" in normalized_data and normalized_data["deadline_date"]:
-                    normalized_data["deadline_date"] = self._parse_date(
-                        normalized_data["deadline_date"]
-                    )
-                
-                # Infer status from dates if not set
-                self._infer_status_from_dates(normalized_data)
-                
-                fields_after = self._count_non_empty_fields(normalized_data)
-                
-                dur = time.time() - start_time
-                return NormalizationResult(
-                    tender=tender,
-                    normalized_data=normalized_data,
-                    method="llm",
-                    fields_before=fields_before,
-                    fields_after=fields_after,
-                    success=True,
-                    error=None,
-                    duration=dur,
-                    missing_fields=missing_fields,
-                    notes=notes,
-                )
+            except ValueError as e:
+                # Check specifically for the "Expected code to be unreachable" error
+                error_msg = str(e)
+                if "Expected code to be unreachable" in error_msg:
+                    logger.error(f"Caught pydantic-ai validation error: {error_msg}")
+                    # Log detailed input data to help diagnose the issue
+                    logger.error(f"Problematic input data structure: {type(input_data.raw_tender)}")
+                    try:
+                        # Try to identify the specific field causing the issue
+                        if "but got: " in error_msg:
+                            problem_field = error_msg.split("but got: ")[1].strip()
+                            if problem_field.startswith("("):
+                                problem_field = problem_field.strip("()'")
+                                parts = problem_field.split(",", 1)
+                                if len(parts) > 1:
+                                    field_name = parts[0].strip("'")
+                                    logger.error(f"Problem appears to be in field: {field_name}")
+                    except Exception:
+                        pass  # If we can't parse the error, just continue to fallback
+                    
+                    return await self._normalize_with_fallback(tender, f"LLM validation error: {error_msg}", start_time)
+                # Re-raise other value errors
+                raise
             except Exception as e:
                 logger.error(f"LLM normalization failed for {tender.id} from {tender.source_table}: {str(e)}")
                 return await self._normalize_with_fallback(tender, str(e), start_time)
+
+            # Essential fields check and fallback if needed
+            self._ensure_critical_fields(normalized_data, tender)
+            
+            # Add URL from raw data if available
+            if url_fields := self._get_url_fields_for_source(tender.source_table):
+                for field_name in url_fields:
+                    if field_value := getattr(tender, field_name, None):
+                        normalized_data["url"] = field_value
+                        logger.info(f"Found primary URL from field {field_name}: {field_value}")
+                        break
+            
+            # Standardize tender type
+            self._map_standard_tender_type(normalized_data, tender)
+            
+            # Ensure valid status
+            self._ensure_valid_status(normalized_data)
+            
+            # Parse dates to standard format
+            if "publication_date" in normalized_data and normalized_data["publication_date"]:
+                normalized_data["publication_date"] = self._parse_date(
+                    normalized_data["publication_date"]
+                )
+            if "deadline_date" in normalized_data and normalized_data["deadline_date"]:
+                normalized_data["deadline_date"] = self._parse_date(
+                    normalized_data["deadline_date"]
+                )
+            
+            # Infer status from dates if not set
+            self._infer_status_from_dates(normalized_data)
+            
+            fields_after = self._count_non_empty_fields(normalized_data)
+            
+            dur = time.time() - start_time
+            return NormalizationResult(
+                tender=tender,
+                normalized_data=normalized_data,
+                method="llm",
+                fields_before=fields_before,
+                fields_after=fields_after,
+                success=True,
+                error=None,
+                duration=dur,
+                missing_fields=missing_fields,
+                notes=notes,
+            )
         except Exception as e:
             logger.error(f"Error during LLM normalization setup: {str(e)}")
             return await self._normalize_with_fallback(tender, str(e), start_time)
