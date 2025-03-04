@@ -5,11 +5,14 @@ import asyncio
 import json
 import logging
 import os
+import re
+import string
 import time
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional, TypeVar, Union
 
-from langdetect import detect
+from langdetect import detect, LangDetectException
+from deep_translator import GoogleTranslator
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_ai import Agent, RunContext
 
@@ -26,6 +29,73 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
+# Language detection and translation functions
+def detect_language(text: str) -> str:
+    """Detect the language of a text string."""
+    if not text or not isinstance(text, str) or len(text.strip()) < 10:
+        return "en"  # Default to English for very short or empty text
+    
+    try:
+        return detect(text)
+    except LangDetectException:
+        return "en"  # Default to English if detection fails
+
+def translate_to_english(text: str, source_lang: str = "auto") -> str:
+    """Translate text to English if it's not already in English."""
+    if not text or not isinstance(text, str) or len(text.strip()) < 5:
+        return text
+    
+    if source_lang == "en":
+        return text
+    
+    try:
+        translator = GoogleTranslator(source=source_lang, target='en')
+        return translator.translate(text)
+    except Exception as e:
+        logger.error(f"Translation error: {str(e)}")
+        return text  # Return original text if translation fails
+
+def format_title(title: str) -> str:
+    """
+    Format a title to be more readable:
+    - Convert ALL CAPS to Title Case
+    - Clean up excessive punctuation and whitespace
+    - Preserve common acronyms
+    """
+    if not title or not isinstance(title, str):
+        return title
+    
+    # Define common acronyms to preserve
+    common_acronyms = ["UN", "EU", "US", "UK", "IT", "ICT", "USD", "EUR", "GBP", "VAT", "RFP", "RFQ"]
+    acronyms_pattern = '|'.join(r'\b' + re.escape(acr) + r'\b' for acr in common_acronyms)
+    
+    # Check if title is ALL CAPS or mostly caps (>70% uppercase)
+    uppercase_ratio = sum(1 for c in title if c.isupper() and c.isalpha()) / max(1, sum(1 for c in title if c.isalpha()))
+    
+    if uppercase_ratio > 0.7:
+        # Replace acronyms with placeholders
+        placeholder_map = {}
+        if acronyms_pattern:
+            def replace_with_placeholder(match):
+                placeholder = f"__ACRONYM_{len(placeholder_map)}__"
+                placeholder_map[placeholder] = match.group(0)
+                return placeholder
+            
+            title = re.sub(acronyms_pattern, replace_with_placeholder, title)
+        
+        # Convert to title case
+        title = string.capwords(title.lower())
+        
+        # Restore acronyms
+        for placeholder, acronym in placeholder_map.items():
+            title = title.replace(placeholder, acronym)
+    
+    # Clean up excessive punctuation and whitespace
+    title = re.sub(r'\s+', ' ', title)  # Remove multiple spaces
+    title = re.sub(r'[^\w\s\-\.,:()/]', '', title)  # Remove unusual symbols
+    title = re.sub(r'[\-_]{2,}', '-', title)  # Replace multiple hyphens with single
+    
+    return title.strip()
 
 class NormalizationInput(BaseModel):
     """
@@ -70,8 +140,23 @@ class NormalizationOutput(BaseModel):
         # Date fields
         date_fields = ["publication_date", "deadline_date", "normalized_at"]
         for field in date_fields:
-            if field in tender and tender[field] and not isinstance(tender[field], (str, datetime, date)):
-                raise ValueError(f"Invalid type for {field}: must be a date/datetime or ISO string")
+            if field in tender and tender[field]:
+                if tender[field] in ["Unknown", "unknown"]:
+                    tender[field] = None
+                    continue
+                
+                if not isinstance(tender[field], (str, datetime, date)):
+                    raise ValueError(f"Invalid type for {field}: must be a date/datetime or ISO string")
+                
+                # Try to parse the date if it's a string
+                if isinstance(tender[field], str):
+                    try:
+                        from dateutil import parser
+                        parsed_date = parser.parse(tender[field]).date().isoformat()
+                        tender[field] = parsed_date
+                    except Exception:
+                        # If we can't parse it, set to None
+                        tender[field] = None
         
         # Numeric fields
         numeric_fields = ["estimated_value"]
@@ -114,11 +199,18 @@ class TenderNormalizer:
                 os.environ["OPENAI_API_KEY"] = settings.openai_api_key.get_secret_value()
                 
         # Set up the agent for normalization
-        self.agent = Agent(
-            settings.openai_model,
-            result_type=NormalizationOutput,
-            system_prompt=self._get_system_prompt(),
-        )
+        try:
+            self.agent = Agent(
+                settings.openai_model,
+                result_type=NormalizationOutput,
+                system_prompt=self._get_system_prompt(),
+            )
+        except TypeError:
+            # Fallback if the Agent constructor signature is different
+            self.agent = Agent(
+                result_type=NormalizationOutput,
+                description=self._get_system_prompt(),
+            )
         
         # Performance tracking
         self.performance_stats = {
@@ -140,7 +232,7 @@ class TenderNormalizer:
         You will be given raw tender data and your goal is to extract and standardize the following fields:
         
         Required fields:
-        - title: Short, descriptive title of the tender opportunity
+        - title: Short, descriptive title of the tender opportunity (in proper title case, not all caps)
         - source_table: The original data source (e.g., "sam_gov", "wb", "adb", etc.)
         - source_id: Original identifier of the tender in the source system
         
@@ -172,6 +264,13 @@ class TenderNormalizer:
         - notice_id: ID of the specific notice
         - reference_number: Reference number for the tender
         - procurement_method: Method used for procurement
+        
+        Guidelines for normalization:
+        1. Extract ALL available fields from the raw data, even if they seem redundant.
+        2. Format titles in proper Title Case, not ALL CAPS. Preserve recognized acronyms.
+        3. Clean up excessive numbers and codes from titles while preserving essential information.
+        4. Remove excessive punctuation and special characters from all text fields.
+        5. If text appears to be in a language other than English, note this in the 'language' field.
         
         For each field, always choose the most specific and accurate value from the raw data.
         If a field is not available in the raw data, do not include it in the output.
@@ -246,21 +345,18 @@ class TenderNormalizer:
             )
             
             # Create a run context (will be passed to the agent)
-            context = RunContext(model="mistral")
-            
-            # Initialize the agent
             try:
-                agent = Agent(
-                    task="Normalize tender data",
-                    description=self._get_system_prompt(),
-                )
-            except Exception as e:
-                logger.error(f"Failed to initialize agent: {str(e)}")
-                # Try without optional parameters if we get an error
-                agent = Agent(description=self._get_system_prompt())
-                
+                context = RunContext(model="mistral")
+            except TypeError:
+                # Fallback if temperature parameter is not supported
+                try:
+                    context = RunContext()
+                except Exception as e:
+                    logger.warning(f"Error creating RunContext: {str(e)}")
+                    context = None
+            
             # Run the normalization
-            result = await agent.run(input_data, context=context)
+            result = await self.agent.run(input_data, context=context)
             output = NormalizationOutput.model_validate(result)
             
             # Save performance data
@@ -276,6 +372,44 @@ class TenderNormalizer:
             tender_data["normalized_method"] = "llm"
             tender_data["normalized_at"] = datetime.utcnow().isoformat()
             tender_data["processing_time_ms"] = processing_time_ms
+            
+            # Apply post-processing to improve quality
+            if "title" in tender_data and tender_data["title"]:
+                tender_data["title"] = format_title(tender_data["title"])
+            
+            # Handle language detection and translation
+            language = None
+            
+            # Detect language from title and description
+            if "title" in tender_data and tender_data["title"]:
+                language = detect_language(tender_data["title"])
+                tender_data["language"] = language
+                
+                # Translate title if not in English
+                if language != "en":
+                    translated_title = translate_to_english(tender_data["title"], language)
+                    if translated_title != tender_data["title"]:
+                        tender_data["title_english"] = translated_title
+            
+            # Translate description if not in English
+            if "description" in tender_data and tender_data["description"]:
+                desc_language = detect_language(tender_data["description"])
+                if not language:
+                    language = desc_language
+                    tender_data["language"] = language
+                
+                if desc_language != "en":
+                    translated_desc = translate_to_english(tender_data["description"], desc_language)
+                    if translated_desc != tender_data["description"]:
+                        tender_data["description_english"] = translated_desc
+            
+            # Organization name translation if needed
+            if "organization_name" in tender_data and tender_data["organization_name"]:
+                org_language = detect_language(tender_data["organization_name"])
+                if org_language != "en":
+                    translated_org = translate_to_english(tender_data["organization_name"], org_language)
+                    if translated_org != tender_data["organization_name"]:
+                        tender_data["organization_name_english"] = translated_org
             
             # Handle dates
             self._infer_status_from_dates(tender_data)
@@ -342,15 +476,16 @@ class TenderNormalizer:
         fields_before = self._count_non_empty_fields(tender_dict)
         
         try:
-            # Copy basic fields
+            # Basic normalized data with metadata
             normalized_data = {
                 "id": tender.id,
+                "source_id": str(tender.source_id),
                 "source_table": tender.source_table,
-                "source_id": getattr(tender, "source_id", tender.id),
                 "normalized_by": "rule-based-fallback",
                 "normalized_method": "fallback",
                 "fallback_reason": error,
                 "normalized_at": datetime.utcnow().isoformat(),
+                "processing_time_ms": int((time.time() - start_time) * 1000),
             }
             
             # Map direct fields
@@ -359,7 +494,10 @@ class TenderNormalizer:
                 "organization_name", "organization_id", "title_english",
                 "description_english", "organization_name_english", "language",
                 "buyer", "project_name", "project_id", "project_number", "sector",
-                "reference_number", "notice_id", "procurement_method",
+                "reference_number", "notice_id", "procurement_method", "tender_type",
+                "status", "publication_date", "deadline_date", "url", "estimated_value",
+                "currency", "city", "contact_name", "contact_email", "contact_phone", 
+                "contact_address",
             ]
             
             # Add source-specific field mappings
@@ -377,6 +515,9 @@ class TenderNormalizer:
                     "contact_name": "point_of_contact",
                     "contact_email": "point_of_contact_email",
                     "contact_phone": "point_of_contact_phone",
+                    "publication_date": "posted_date",
+                    "deadline_date": "response_deadline",
+                    "status": "archive_type", 
                 },
                 "wb": {
                     "title": "title",
@@ -391,6 +532,10 @@ class TenderNormalizer:
                     "contact_name": "contact_person",
                     "contact_email": "contact_email",
                     "contact_phone": "contact_phone",
+                    "publication_date": "published",
+                    "deadline_date": "deadline",
+                    "estimated_value": "contract_value",
+                    "currency": "contract_currency",
                 },
                 "adb": {
                     "title": "notice_title",
@@ -403,6 +548,8 @@ class TenderNormalizer:
                     "notice_id": "notice_number",
                     "procurement_method": "procurement_method",
                     "buyer": "executing_agency",
+                    "publication_date": "published_date",
+                    "deadline_date": "closing_date",
                 },
                 "ted_eu": {
                     "title": "title",
@@ -417,6 +564,10 @@ class TenderNormalizer:
                     "contact_email": "contact_email",
                     "contact_phone": "contact_telephone",
                     "contact_address": "contact_address",
+                    "publication_date": "document_sent_date",
+                    "deadline_date": "deadline",
+                    "estimated_value": "value_magnitude",
+                    "currency": "value_currency",
                 },
                 "ungm": {
                     "title": "title",
@@ -430,6 +581,7 @@ class TenderNormalizer:
                     "procurement_method": "procurement_method",
                     "contact_name": "contact_name",
                     "contact_email": "contact_email",
+                    "publication_date": "published_date",
                 },
                 "afd_tenders": {
                     "title": "notice_title",
@@ -440,6 +592,8 @@ class TenderNormalizer:
                     "reference_number": "reference",
                     "notice_id": "notice_id",
                     "sector": "sector",
+                    "publication_date": "launch_date",
+                    "deadline_date": "closure_date",
                 },
                 "iadb": {
                     "title": "notice_title",
@@ -450,6 +604,8 @@ class TenderNormalizer:
                     "notice_id": "notice_id",
                     "buyer": "borrower",
                     "sector": "sector",
+                    "publication_date": "published_date",
+                    "deadline_date": "deadline_date",
                 },
                 "afdb": {
                     "title": "title",
@@ -461,6 +617,8 @@ class TenderNormalizer:
                     "notice_id": "reference_number",
                     "reference_number": "reference_number",
                     "buyer": "borrower",
+                    "publication_date": "publication_date",
+                    "deadline_date": "deadline_date",
                 },
                 "aiib": {
                     "title": "project_notice",
@@ -471,6 +629,8 @@ class TenderNormalizer:
                     "sector": "sector",
                     "notice_id": "notice_id",
                     "buyer": "borrower",
+                    "publication_date": "publication_date",
+                    "deadline_date": "deadline",
                 }
             }
             
@@ -496,7 +656,7 @@ class TenderNormalizer:
                             if value is None and hasattr(tender, "source_data") and tender.source_data:
                                 value = tender.source_data.get(source_field)
                         
-                        if value and str(value).strip():
+                        if value is not None and str(value).strip():
                             normalized_data[norm_field] = value
             
             # Then apply direct mappings for any fields not already mapped
@@ -508,8 +668,46 @@ class TenderNormalizer:
                     if value is None and hasattr(tender, "source_data") and tender.source_data:
                         value = tender.source_data.get(field)
                     
-                    if value and str(value).strip():
+                    if value is not None and str(value).strip():
                         normalized_data[field] = value
+            
+            # Apply post-processing to improve quality
+            if "title" in normalized_data and normalized_data["title"]:
+                normalized_data["title"] = format_title(normalized_data["title"])
+            
+            # Handle language detection and translation
+            language = None
+            
+            # Detect language from title and description
+            if "title" in normalized_data and normalized_data["title"]:
+                language = detect_language(normalized_data["title"])
+                normalized_data["language"] = language
+                
+                # Translate title if not in English
+                if language != "en":
+                    translated_title = translate_to_english(normalized_data["title"], language)
+                    if translated_title != normalized_data["title"]:
+                        normalized_data["title_english"] = translated_title
+            
+            # Translate description if not in English
+            if "description" in normalized_data and normalized_data["description"]:
+                desc_language = detect_language(normalized_data["description"])
+                if not language:
+                    language = desc_language
+                    normalized_data["language"] = language
+                
+                if desc_language != "en":
+                    translated_desc = translate_to_english(normalized_data["description"], desc_language)
+                    if translated_desc != normalized_data["description"]:
+                        normalized_data["description_english"] = translated_desc
+            
+            # Organization name translation if needed
+            if "organization_name" in normalized_data and normalized_data["organization_name"]:
+                org_language = detect_language(normalized_data["organization_name"])
+                if org_language != "en":
+                    translated_org = translate_to_english(normalized_data["organization_name"], org_language)
+                    if translated_org != normalized_data["organization_name"]:
+                        normalized_data["organization_name_english"] = translated_org
             
             # Handle URL fields
             for url_field in ["url", "link", "web_link"]:
@@ -716,28 +914,91 @@ class TenderNormalizer:
                 improvement_percentage=0,
             )
 
-    def _infer_status_from_dates(self, normalized_data: Dict[str, Any]) -> None:
-        """Infer tender status from dates."""
-        deadline = normalized_data.get("deadline_date")
-        publication = normalized_data.get("publication_date")
+    def _parse_date(self, date_str: Optional[str]) -> Optional[str]:
+        """Parse a date string into ISO format or return None if invalid."""
+        if not date_str or date_str == "Unknown" or date_str.lower() == "unknown":
+            return None
         
-        if not deadline:
-            normalized_data["status"] = TenderStatus.UNKNOWN
+        try:
+            # Try different date formats
+            for date_format in [
+                "%Y-%m-%d",
+                "%Y/%m/%d",
+                "%d-%m-%Y",
+                "%d/%m/%Y",
+                "%m-%d-%Y",
+                "%m/%d/%Y",
+                "%b %d, %Y",
+                "%B %d, %Y",
+                "%d %b %Y",
+                "%d %B %Y",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S.%f",
+                "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+            ]:
+                try:
+                    dt = datetime.strptime(date_str, date_format)
+                    return dt.date().isoformat()
+                except ValueError:
+                    continue
+            
+            # If none of the formats work, try dateutil parser as last resort
+            from dateutil import parser
+            dt = parser.parse(date_str)
+            return dt.date().isoformat()
+        except Exception as e:
+            logger.warning(f"Failed to parse date: {date_str} - {str(e)}")
+            return None
+
+    def _infer_status_from_dates(self, tender_data: Dict[str, Any]) -> None:
+        """
+        Infer tender status from publication and deadline dates if status is not available.
+        
+        Args:
+            tender_data: The tender data dictionary
+        """
+        # Skip if status is already set and not "unknown"
+        if tender_data.get("status") and tender_data["status"].lower() != "unknown":
             return
         
-        now = datetime.utcnow()
+        # Parse dates if they're strings
+        publication_date = None
+        deadline_date = None
         
-        if isinstance(deadline, str):
-            try:
-                deadline = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                normalized_data["status"] = TenderStatus.UNKNOWN
-                return
+        if "publication_date" in tender_data:
+            if isinstance(tender_data["publication_date"], str):
+                publication_date = self._parse_date(tender_data["publication_date"])
+                # Update the field with parsed value
+                tender_data["publication_date"] = publication_date
+            elif isinstance(tender_data["publication_date"], (datetime, date)):
+                publication_date = tender_data["publication_date"].isoformat()
         
-        if deadline > now:
-            normalized_data["status"] = TenderStatus.ACTIVE
+        if "deadline_date" in tender_data:
+            if isinstance(tender_data["deadline_date"], str):
+                deadline_date = self._parse_date(tender_data["deadline_date"])
+                # Update the field with parsed value
+                tender_data["deadline_date"] = deadline_date
+            elif isinstance(tender_data["deadline_date"], (datetime, date)):
+                deadline_date = tender_data["deadline_date"].isoformat()
+        
+        # Infer status based on dates
+        today = date.today().isoformat()
+        
+        if deadline_date:
+            if deadline_date < today:
+                tender_data["status"] = "closed"
+            else:
+                tender_data["status"] = "active"
+        elif publication_date:
+            if publication_date > today:
+                tender_data["status"] = "upcoming"
+            else:
+                # Default to active if we only have publication date
+                tender_data["status"] = "active"
         else:
-            normalized_data["status"] = TenderStatus.CLOSED
+            # No useful date information
+            tender_data["status"] = "unknown"
 
     def _ensure_critical_fields(self, normalized_data: Dict[str, Any], tender: RawTender) -> None:
         """

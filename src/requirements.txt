@@ -1,0 +1,13 @@
+python-dotenv==1.0.1
+pydantic==2.7.3
+pydantic-settings==2.2.1
+openai==1.27.2
+pydantic-ai==0.0.19
+tenacity==8.2.3
+pydantic-ai-slim==0.0.5
+langdetect==1.0.9
+psycopg2-binary==2.9.9
+supabase==2.5.0
+dateparser==1.1.8
+deep-translator==1.11.4
+python-dateutil==2.9.0 
