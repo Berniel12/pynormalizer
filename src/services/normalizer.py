@@ -748,6 +748,7 @@ class TenderNormalizer:
                     "contact_email": "contact_email",
                     "publication_date": "published_date",
                     "url": "link",
+                    "tender_type": "procurement_method",
                     "source_id": "id",
                 },
                 "afd_tenders": {
@@ -1059,6 +1060,12 @@ class TenderNormalizer:
             # Ensure all critical fields are present
             self._ensure_critical_fields(normalized_data, tender)
             
+            # Standardize tender_type to match our schema
+            self._map_standard_tender_type(normalized_data, tender)
+            
+            # Ensure status is valid - map any non-standard values to valid ones
+            self._ensure_valid_status(normalized_data)
+            
             # Log quality check
             log_quality_check(tender.id, tender.source_table, tender_dict, normalized_data)
             
@@ -1073,10 +1080,6 @@ class TenderNormalizer:
                 if fields_before > 0
                 else 0
             )
-            
-            # After all mappings are done, standardize fields that need normalization
-            # Standardize tender_type to match our schema
-            self._map_standard_tender_type(normalized_data, tender)
             
             # Create the result
             result = NormalizationResult(
@@ -1627,6 +1630,49 @@ class TenderNormalizer:
                     normalized_data["tender_type"] = "unknown"
             else:
                 normalized_data["tender_type"] = "unknown"
+
+    def _ensure_valid_status(self, normalized_data: Dict[str, Any]) -> None:
+        """
+        Ensure the status is valid.
+        
+        Args:
+            normalized_data: The normalized data dictionary
+        """
+        valid_statuses = ["active", "closed", "awarded", "canceled", "upcoming", "unknown"]
+        
+        # Handle incorrect tender type in status field
+        if "status" in normalized_data and normalized_data["status"]:
+            if isinstance(normalized_data["status"], str):
+                status_lower = normalized_data["status"].lower()
+                
+                # Handle common procurement methods that should not be in status
+                procurement_methods = [
+                    "request for proposal", "request for quotation", "invitation to bid", 
+                    "call for individual consultants", "request for expression of interest",
+                    "expression of interest", "rfi", "rfp", "rfq", "itb"
+                ]
+                
+                if status_lower in procurement_methods:
+                    # Move this value to tender_type if it's a procurement method
+                    if status_lower not in valid_statuses:
+                        # Save this as procurement_method if no value exists
+                        if "procurement_method" not in normalized_data or not normalized_data["procurement_method"]:
+                            normalized_data["procurement_method"] = normalized_data["status"]
+                        
+                        # Also use this value for tender_type if none exists
+                        if "tender_type" not in normalized_data or not normalized_data["tender_type"]:
+                            normalized_data["tender_type"] = normalized_data["status"]
+                        
+                        # Reset status to a valid value (will be set by date inference)
+                        normalized_data["status"] = "unknown"
+                
+                # If still invalid, set to unknown
+                if normalized_data["status"].lower() not in valid_statuses:
+                    normalized_data["status"] = "unknown"
+        
+        # Always re-apply date-based status inference as a last resort
+        if "status" not in normalized_data or normalized_data["status"] == "unknown":
+            self._infer_status_from_dates(normalized_data)
 
 
 # Create a singleton instance
