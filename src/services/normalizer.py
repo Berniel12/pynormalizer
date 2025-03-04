@@ -106,6 +106,36 @@ def format_title(title: str) -> str:
     
     return title.strip()
 
+def clean_url(url: str) -> str:
+    """
+    Clean a URL by removing @ prefix and any appended text.
+    
+    Args:
+        url: The URL to clean
+        
+    Returns:
+        Cleaned URL
+    """
+    if not url or not isinstance(url, str):
+        return url
+    
+    # Remove @ prefix if present
+    if url.startswith('@'):
+        url = url[1:]
+    
+    # Remove trailing punctuation
+    if url and url[-1] in '.,;:)]}':
+        url = url[:-1]
+    
+    # Clean up URLs with appended text (look for domain endings)
+    # This regex finds the valid part of the URL ending at a valid TLD
+    valid_url_pattern = re.compile(r'(https?://[^/]+(?:/[^/\s]*)*)')
+    valid_parts = valid_url_pattern.findall(url)
+    if valid_parts:
+        url = valid_parts[0]
+    
+    return url.strip()
+
 def extract_urls_from_text(text: str) -> List[str]:
     """
     Extract URLs from text content.
@@ -121,18 +151,30 @@ def extract_urls_from_text(text: str) -> List[str]:
     
     # Regular expression to find URLs in text
     url_pattern = re.compile(
-        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        r'(?:@)?http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     )
     
     # Find all matches
     urls = url_pattern.findall(text)
     
-    # Clean up URLs (remove trailing punctuation)
+    # Clean up URLs (remove prefixes, suffixes, and trailing punctuation)
     clean_urls = []
     for url in urls:
+        # Remove @ prefix if present
+        if url.startswith('@'):
+            url = url[1:]
+        
         # Remove trailing punctuation
         if url and url[-1] in '.,;:)]}':
             url = url[:-1]
+            
+        # Clean up URLs with appended text (look for domain endings)
+        # This regex finds the valid part of the URL ending at a valid TLD
+        valid_url_pattern = re.compile(r'(https?://[^/]+(?:/[^/\s]*)*)')
+        valid_parts = valid_url_pattern.findall(url)
+        if valid_parts:
+            url = valid_parts[0]
+            
         if url:
             clean_urls.append(url)
     
@@ -920,9 +962,9 @@ class TenderNormalizer:
                     url_value = tender.source_data.get(primary_url_field)
                 
                 if url_value and str(url_value).strip():
-                    normalized_data["url"] = str(url_value).strip()
+                    normalized_data["url"] = clean_url(str(url_value))
                     url_found = True
-                    logger.info(f"Found primary URL from field {primary_url_field}: {url_value}")
+                    logger.info(f"Found primary URL from field {primary_url_field}: {normalized_data['url']}")
             
             # If no primary URL found, check other URL fields
             if not url_found:
@@ -931,10 +973,10 @@ class TenderNormalizer:
                         # If we already have a primary URL but found another one, add it to document_links
                         if url_found and url_field != "url":
                             normalized_data.setdefault("document_links", [])
-                            normalized_data["document_links"].append({"url": normalized_data[url_field]})
+                            normalized_data["document_links"].append({"url": clean_url(normalized_data[url_field])})
                         else:
                             # Set as primary URL if we don't have one yet
-                            normalized_data["url"] = normalized_data[url_field]
+                            normalized_data["url"] = clean_url(normalized_data[url_field])
                             url_found = True
                     
                     # Also check tender attributes and source_data
@@ -946,16 +988,16 @@ class TenderNormalizer:
                         if url_value and str(url_value).strip():
                             if url_found and url_field != "url":
                                 normalized_data.setdefault("document_links", [])
-                                normalized_data["document_links"].append({"url": url_value})
+                                normalized_data["document_links"].append({"url": clean_url(str(url_value))})
                             else:
-                                normalized_data["url"] = url_value
+                                normalized_data["url"] = clean_url(str(url_value))
                                 url_found = True
             
             # Extract URLs from description and other text fields only as a fallback
             if not url_found and "description" in normalized_data and normalized_data["description"]:
                 urls = extract_urls_from_text(normalized_data["description"])
                 if urls:
-                    normalized_data["url"] = urls[0]  # Use the first URL
+                    normalized_data["url"] = urls[0]  # No need to clean as extract_urls_from_text already cleans
                     url_found = True
                     logger.info(f"Extracted URL from description: {urls[0]}")
                     
