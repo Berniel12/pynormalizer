@@ -1043,6 +1043,44 @@ class TenderNormalizer:
             
         return results
 
+    def normalize_test_tender(self, tender: dict, source_table: str) -> dict:
+        # Handle test tenders that don't come from Supabase
+        tender_id = str(tender.get("id", ""))
+        logging.info(f"Normalizing tender {tender_id} from {source_table}")
+        
+        # Debug dump for test input
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        debug_filename = f"debug_dumps/input_{source_table}_{tender_id}_{timestamp}.json"
+        os.makedirs("debug_dumps", exist_ok=True)
+        
+        try:
+            with open(debug_filename, 'w') as f:
+                json.dump(tender, f, indent=2)
+            logging.info(f"Saved debug data to {debug_filename}")
+        except Exception as e:
+            logging.error(f"Error saving debug data: {e}")
+        
+        return self.normalize_tender(tender, source_table)
+    
+    def log_performance_stats(self):
+        """Log performance statistics for the normalizer."""
+        if hasattr(self, 'performance_stats'):
+            for source, stats in self.performance_stats.items():
+                success_rate = 0
+                if stats['total'] > 0:
+                    success_rate = (stats['success'] / stats['total']) * 100
+                
+                logging.info(f"Source {source}: {stats['success']}/{stats['total']} successful ({success_rate:.1f}%)")
+                
+                if stats['total'] > 0:
+                    avg_time = stats['total_time'] / stats['total']
+                    logging.info(f"Average processing time: {avg_time:.2f}s")
+                    
+                    if stats['completion_times']:
+                        logging.info(f"Fastest: {min(stats['completion_times']):.2f}s, Slowest: {max(stats['completion_times']):.2f}s")
+        else:
+            logging.info("No performance stats available.")
+
 
 # Create a singleton instance
 normalizer = TenderNormalizer() 
