@@ -4,12 +4,16 @@ This repository contains the Python-based normalizer service for processing tend
 
 ## Latest Updates
 
-The latest version (commit `2cc62a1`) includes important fixes for:
+The latest version (commit `b29d864`) includes important fixes for:
 
 1. Country validation for all sources (SAM.gov, TED EU, UNGM, AIIB, etc.)
 2. Title extraction for ADB and IADB tenders
 3. Date parsing for AFD tenders and handling "Unknown" dates for AFDB
 4. Performance stats logging method
+
+## Deployment History
+
+- **Version 1.1.0** (Latest) - Updated on June 25, 2023 with validation fixes and improved error handling
 
 ## Deployment Instructions
 
