@@ -1,6 +1,54 @@
-# Python Normalizer
+# Python Tender Normalizer
 
-A Python service for normalizing tender data using various methods, including LLM-based normalization.
+This repository contains the Python-based normalizer service for processing tenders from various sources.
+
+## Latest Updates
+
+The latest version (commit `2cc62a1`) includes important fixes for:
+
+1. Country validation for all sources (SAM.gov, TED EU, UNGM, AIIB, etc.)
+2. Title extraction for ADB and IADB tenders
+3. Date parsing for AFD tenders and handling "Unknown" dates for AFDB
+4. Performance stats logging method
+
+## Deployment Instructions
+
+To deploy the latest version:
+
+1. **Pull the repository**:
+   ```bash
+   git clone https://github.com/Berniel12/pynormalizer.git
+   cd pynormalizer
+   git checkout main
+   ```
+
+2. **Build the Docker image**:
+   ```bash
+   docker build -t pynormalizer:latest .
+   ```
+
+3. **Tag and push to your registry** (replace with your actual registry URL):
+   ```bash
+   docker tag pynormalizer:latest your-registry.com/pynormalizer:latest
+   docker push your-registry.com/pynormalizer:latest
+   ```
+
+4. **Update your deployment** to use the latest image.
+
+For more detailed deployment instructions, see the [DEPLOYMENT.md](DEPLOYMENT.md) file.
+
+## Environment Variables
+
+The normalizer requires the following environment variables:
+
+- `SUPABASE_URL`: URL of your Supabase instance
+- `SUPABASE_KEY`: API key for Supabase
+- `OPENAI_API_KEY`: OpenAI API key (if using OpenAI capabilities)
+- `TEST_MODE`: Set to 'True' to run in test mode with a limited number of tenders
+
+## Troubleshooting
+
+If you encounter validation errors, ensure you're using the latest version of the code, which includes robust fallback mechanisms for all required fields.
 
 ## Features
 
