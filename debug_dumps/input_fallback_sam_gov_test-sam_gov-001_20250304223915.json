@@ -1,0 +1,45 @@
+{
+  "id": "test-sam_gov-001",
+  "source_table": "sam_gov",
+  "title": "Test tender with special chars: apostrophe's, quotes\", and em-dash\u2014plus accented chars \u00e9\u00e8\u00e7\u00e0",
+  "description": "\n        This is a test tender description with various special characters:\n        \u2022 Bullets and lists\n        \u2022 Single quotes: ' and ' and \u201b\n        \u2022 Double quotes: \" and \" and \u201e\n        \u2022 Dashes: - and \u2013 and \u2014 \n        \u2022 Other symbols: \u2026 \u00a9 \u00ae \u2122 \u20ac \u00a3 \u00a5 \u00f7 \u00d7 \n        \u2022 Accented: \u00e0\u00e1\u00e2\u00e3\u00e4\u00e5\u00e7\u00e8\u00e9\u00ea\u00eb\u00ec\u00ed\u00ee\u00ef\u00f1\u00f2\u00f3\u00f4\u00f5\u00f6\u00f9\u00fa\u00fb\u00fc\u00fd\u00ff\n        \u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+  "publication_date": "2025-03-04T22:39:15.f",
+  "deadline_date": null,
+  "country": "United States",
+  "country_code": null,
+  "location": null,
+  "organization_name": "Test Organization & Partners, LLC.",
+  "organization_id": null,
+  "title_english": null,
+  "description_english": null,
+  "organization_name_english": null,
+  "status": null,
+  "tender_type": null,
+  "value": null,
+  "currency": null,
+  "language": null,
+  "url": "https://example.com/tender/123",
+  "link": null,
+  "web_link": null,
+  "source_id": null,
+  "source_data": null,
+  "created_at": null,
+  "updated_at": null,
+  "normalized": false,
+  "processed": false,
+  "nested_data": {
+    "complex_field": {
+      "array_with_mixed_types": [
+        1,
+        "two",
+        3.0,
+        null,
+        {
+          "key": "value"
+        }
+      ],
+      "empty_list": [],
+      "problematic_string": "Problem string with null bytes: \u0000\u0000\u0000"
+    }
+  }
+}

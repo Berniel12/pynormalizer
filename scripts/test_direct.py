@@ -1,50 +1,36 @@
 #!/usr/bin/env python3
-"""
-Script to test the DirectNormalizer implementation.
-"""
+import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
-import logging
-from datetime import datetime
 import time
-import random
-import string
-import openai
 import traceback
+from pathlib import Path
+
+import openai
+
+# Add the src directory to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
+from src.config import settings
+from src.services.direct_normalizer import DirectNormalizer
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
 )
-logger = logging.getLogger("direct_normalizer_test")
+logger = logging.getLogger("direct_tester")
 
-# Add the parent directory to the path so we can import the src package
-sys.path.append(".")
-
-# Check if OpenAI API key is provided
-if len(sys.argv) > 1:
-    api_key = sys.argv[1]
-    logger.info("Using API key from command line argument")
-else:
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        logger.error("No OpenAI API key provided. Please provide it as an argument or set OPENAI_API_KEY environment variable.")
-        sys.exit(1)
-    logger.info("Using API key from environment variable")
-
-# Import the DirectNormalizer
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.services.direct_normalizer import DirectNormalizer
-
-def create_test_tender(tender_id="test-sam_gov-001", source="sam_gov"):
-    """Create a test tender with potentially problematic data."""
+def create_test_tender():
+    """Create a test tender with various special characters and nested data."""
+    logger.info("Creating test tender")
+    
     return {
-        "id": tender_id,
-        "source_table": source,
+        "id": "test-sam_gov-001",
+        "source_table": "sam_gov",
         "title": "Test tender with special chars: apostrophe's, quotes\", and em-dash—plus accented chars éèçà",
         "description": """
         This is a test tender description with various special characters:
@@ -55,7 +41,7 @@ def create_test_tender(tender_id="test-sam_gov-001", source="sam_gov"):
         • Other symbols: … © ® ™ € £ ¥ ÷ × 
         • Accented: àáâãäåçèéêëìíîïñòóôõöùúûüýÿ
         """,
-        "publication_date": datetime.now().isoformat(),
+        "publication_date": time.strftime("%Y-%m-%dT%H:%M:%S.%f"),
         "deadline_date": None,
         "country": "United States",
         "country_code": None,
@@ -96,78 +82,124 @@ def create_test_tender(tender_id="test-sam_gov-001", source="sam_gov"):
         }
     }
 
-async def test_direct_normalization():
+async def test_direct_normalization(api_key):
     """Test the DirectNormalizer implementation."""
-    logger.info("Starting DirectNormalizer test")
-    
-    # Create test tender
-    test_tender = create_test_tender()
-    logger.info(f"Created test tender: {test_tender['id']} from {test_tender['source_table']}")
-    
-    # Initialize the DirectNormalizer
-    normalizer = DirectNormalizer(
-        api_key=api_key,
-        model="gpt-4o",
-        max_retries=2,
-        retry_delay=1
-    )
-    
-    # Normalize tender
-    logger.info("Starting normalization process...")
     try:
-        normalized_data, method, processing_time = await normalizer.normalize_tender(test_tender)
+        # Create a test tender
+        tender = create_test_tender()
+        logger.info(f"Created test tender: {tender['id']} from {tender['source_table']}")
         
-        # Check if normalization was successful
-        if method == "llm":
-            logger.info(f"✅ SUCCESS: Normalization completed in {processing_time:.2f}s")
-            logger.info(f"Normalized tender data: {json.dumps(normalized_data['tender'], indent=2)}")
+        # Save input data for debugging
+        debug_dir = Path("debug_dumps")
+        debug_dir.mkdir(exist_ok=True)
+        
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        input_filename = f"input_{tender['source_table']}_{tender['id']}_{timestamp}.json"
+        with open(debug_dir / input_filename, "w") as f:
+            json.dump(tender, f, indent=2)
+        logger.info(f"Saved input data to {debug_dir / input_filename}")
+        
+        # Initialize the DirectNormalizer
+        logger.info(f"Initializing DirectNormalizer with API key: {api_key[:5]}...{api_key[-4:] if len(api_key) > 8 else ''}")
+        normalizer = DirectNormalizer(
+            api_key=api_key,
+            model=settings.openai_model if hasattr(settings, 'openai_model') else "gpt-4o-mini"
+        )
+        
+        # Normalize the tender
+        logger.info("Starting normalization process...")
+        start_time = time.time()
+        
+        try:
+            result = await normalizer.normalize_tender(tender, save_debug=True)
             
-            # Save normalized data to file
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            output_file = f"debug_dumps/normalized_{test_tender['source_table']}_{test_tender['id']}_{timestamp}.json"
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(normalized_data, f, indent=2, ensure_ascii=False)
-            logger.info(f"Saved normalized data to {output_file}")
+            end_time = time.time()
+            processing_time = end_time - start_time
             
-            # Check for missing fields
-            if "missing_fields" in normalized_data and normalized_data["missing_fields"]:
-                logger.warning(f"Missing fields: {', '.join(normalized_data['missing_fields'])}")
+            if result and "normalized_data" in result and result["normalized_data"]:
+                logger.info(f"✅ SUCCESS: Tender normalized in {processing_time:.2f} seconds")
+                logger.info(f"Method used: {result.get('method', 'unknown')}")
+                
+                # Check for missing fields
+                missing_fields = result.get("missing_fields", [])
+                if missing_fields:
+                    logger.warning(f"Missing fields: {', '.join(missing_fields)}")
+                
+                # Check for notes
+                notes = result.get("notes")
+                if notes:
+                    logger.info(f"Notes: {notes}")
+                
+                # Save output data for debugging
+                output_filename = f"output_{tender['source_table']}_{tender['id']}_{timestamp}.json"
+                with open(debug_dir / output_filename, "w") as f:
+                    json.dump(result, f, indent=2)
+                logger.info(f"Saved output data to {debug_dir / output_filename}")
+                
+                # Print the normalized data
+                logger.info("Normalized data:")
+                logger.info(json.dumps(result["normalized_data"], indent=2))
+                
+                return True
+            else:
+                logger.error("❌ FAILURE: Normalization returned empty or invalid result")
+                return False
+                
+        except openai.AuthenticationError as e:
+            logger.error(f"❌ FAILURE: OpenAI API authentication error: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ FAILURE: Error during normalization: {str(e)}")
             
-            # Check for notes
-            if "notes" in normalized_data and normalized_data["notes"]:
-                logger.info(f"Notes: {normalized_data['notes']}")
-        else:
-            logger.error(f"❌ FAILURE: Normalization failed")
-            logger.error(f"Error message: {normalized_data.get('notes', 'Unknown error')}")
-            logger.error(f"Method used: {method}")
-            logger.error(f"Processing time: {processing_time:.2f}s")
-    except openai.AuthenticationError as e:
-        logger.error(f"❌ AUTHENTICATION ERROR: {str(e)}")
-        logger.info("Please check your OpenAI API key and try again. The current key is invalid.")
+            # Save error data for debugging
+            error_data = {
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }
+            error_filename = f"error_{tender['source_table']}_{tender['id']}_{timestamp}.json"
+            with open(debug_dir / error_filename, "w") as f:
+                json.dump(error_data, f, indent=2)
+            logger.info(f"Saved error data to {debug_dir / error_filename}")
+            
+            return False
+            
     except Exception as e:
-        logger.error(f"❌ EXCEPTION: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-    
-    # Check for any error logs in debug_dumps directory
-    for filename in os.listdir("debug_dumps"):
-        if filename.startswith("error_") and test_tender["source_table"] in filename and test_tender["id"] in filename:
-            logger.info(f"Found error log: {filename}")
-            try:
-                with open(os.path.join("debug_dumps", filename), "r", encoding="utf-8") as f:
-                    error_data = json.load(f)
-                    logger.error(f"Error details: {error_data.get('error', 'Unknown error')}")
-                    logger.error(f"Traceback: {error_data.get('traceback', 'No traceback available')}")
-            except Exception as e:
-                logger.error(f"Failed to read error log: {str(e)}")
-    
-    # Log performance statistics
-    normalizer._log_performance_stats()
-    
-    logger.info("DirectNormalizer test completed")
+        logger.error(f"❌ FAILURE: Unexpected error: {str(e)}")
+        return False
+    finally:
+        # Check for error logs in debug_dumps directory
+        debug_dir = Path("debug_dumps")
+        error_files = list(debug_dir.glob(f"error_*_{tender['id']}_*.json"))
+        if error_files:
+            for error_file in error_files:
+                try:
+                    with open(error_file, "r") as f:
+                        error_data = json.load(f)
+                    logger.info(f"Contents of {error_file.name}:")
+                    logger.info(json.dumps(error_data, indent=2))
+                except Exception as e:
+                    logger.error(f"Error reading error file {error_file}: {str(e)}")
+        
+        # Log performance stats
+        logger.info("DirectNormalizer test completed")
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Test the DirectNormalizer implementation")
+    parser.add_argument("--api-key", help="OpenAI API key")
+    args = parser.parse_args()
+    
+    # Get the API key from command line arguments or environment variables
+    api_key = args.api_key or os.environ.get("OPENAI_API_KEY") or settings.openai_api_key.get_secret_value()
+    
+    if not api_key:
+        logger.error("No OpenAI API key provided. Please set the OPENAI_API_KEY environment variable or use the --api-key argument.")
+        sys.exit(1)
+    
+    logger.info(f"Using OpenAI API key: {api_key[:5]}...{api_key[-4:] if len(api_key) > 8 else ''}")
+    
     # Create debug directory if it doesn't exist
     os.makedirs("debug_dumps", exist_ok=True)
     
     # Run the test
-    asyncio.run(test_direct_normalization()) 
+    asyncio.run(test_direct_normalization(api_key)) 

@@ -1,74 +1,91 @@
-# Tender Normalizer (Python Version)
+# Python Normalizer
 
-A Python-based implementation of the tender normalization system using Pydantic and PydanticAI.
-
-## Overview
-
-This project uses Pydantic and PydanticAI to normalize tender data from various sources. The goal is to provide a more robust, type-safe implementation with enhanced LLM integration compared to the Node.js version.
+A Python service for normalizing tender data using various methods, including LLM-based normalization.
 
 ## Features
 
-- Strong data validation using Pydantic models
-- Structured LLM interactions using PydanticAI
-- Improved handling of critical fields (title, country, description)
-- Robust fallback mechanisms for LLM timeouts
-- Monitoring and instrumentation with Logfire
+- Normalizes tender data from various sources into a consistent format
+- Uses multiple normalization methods with fallback mechanisms:
+  1. PydanticAI-based normalization (primary method)
+  2. DirectNormalizer using OpenAI API (fallback for PydanticAI serialization issues)
+  3. MockNormalizer for testing and fallback when API calls fail
+  4. Direct parsing as a final fallback
+- Handles special characters and complex nested data structures
+- Provides detailed logging and debugging information
 
-## Project Structure
+## Installation
 
+```bash
+pip install -r requirements.txt
 ```
-python_normalizer/
-├── src/                 # Source code
-│   ├── models/          # Pydantic data models
-│   ├── services/        # Business logic services
-│   ├── config.py        # Configuration settings
-│   └── main.py          # Application entry point
-├── tests/               # Test cases
-├── scripts/             # Utility scripts
-└── pyproject.toml       # Project dependencies and configuration
-```
-
-## Setup
-
-1. Create a virtual environment:
-   ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-2. Install dependencies:
-   ```
-   pip install -e ".[dev]"
-   ```
-
-3. Create a `.env` file with required environment variables:
-   ```
-   SUPABASE_URL=your_supabase_url
-   SUPABASE_KEY=your_supabase_key
-   OPENAI_API_KEY=your_openai_key
-   LOGFIRE_TOKEN=your_logfire_token
-   ```
 
 ## Usage
 
-To process tenders:
-
 ```python
-from src.main import process_all_tenders
+from src.models.tender import RawTender
+from src.services.normalizer import TenderNormalizer
 
-# Process all unprocessed tenders
-process_all_tenders()
+# Create a tender normalizer
+normalizer = TenderNormalizer()
+
+# Create a raw tender
+tender = RawTender(
+    id="tender-001",
+    source_table="sam_gov",
+    title="Example Tender",
+    description="This is an example tender description.",
+    country="United States",
+    organization_name="Example Organization"
+)
+
+# Normalize the tender
+result = normalizer.normalize_tender_sync(tender)
+
+# Access the normalized data
+normalized_data = result["normalized_data"]
+method_used = result["method"]
+processing_time = result["processing_time"]
 ```
 
-## Development
+## Fallback Mechanism
 
-This project uses:
-- Black and isort for code formatting
-- Mypy for type checking
-- Pytest for testing
-- Ruff for linting
+The normalizer implements a robust fallback mechanism to ensure that tender data is always normalized, even when the primary methods fail:
 
-Run the test suite:
+1. **PydanticAI Normalization**: The primary method uses PydanticAI to normalize the tender data. This provides strong type validation and structured output.
+
+2. **DirectNormalizer Fallback**: If PydanticAI fails due to serialization issues (common with the "Expected code to be unreachable" error in PydanticAI 0.0.31), the normalizer falls back to DirectNormalizer, which makes direct API calls to OpenAI.
+
+3. **MockNormalizer Fallback**: If both PydanticAI and DirectNormalizer fail (e.g., due to API authentication errors), the normalizer falls back to MockNormalizer, which provides a mock implementation for testing and development.
+
+4. **Direct Parsing Fallback**: As a final fallback, the normalizer uses direct parsing to extract basic fields from the raw tender data.
+
+This multi-level fallback mechanism ensures that the normalization process is robust and can handle various error conditions.
+
+## Testing
+
+The repository includes several test scripts to verify the functionality of the normalizer:
+
+- `scripts/test_llm.py`: Tests the PydanticAI-based normalization
+- `scripts/test_direct.py`: Tests the DirectNormalizer implementation
+- `scripts/test_mock.py`: Tests the MockNormalizer implementation
+- `scripts/test_fallback.py`: Tests the fallback mechanism
+- `scripts/test_all_normalizers.py`: Tests all normalization methods
+
+To run the tests:
+
+```bash
+python -m scripts.test_all_normalizers
 ```
-pytest
-``` 
+
+## Configuration
+
+The normalizer can be configured using environment variables or by modifying the `src/config.py` file:
+
+- `OPENAI_API_KEY`: OpenAI API key for LLM-based normalization
+- `OPENAI_MODEL`: OpenAI model to use (default: "gpt-4o-mini")
+
+> **Important Note**: This project uses `gpt-4o-mini` as the default model for all API calls to minimize costs. Other models like `gpt-4o`, `gpt-4-turbo`, or `gpt-4` are significantly more expensive and should **not** be used for this task unless there's a specific requirement. The `gpt-4o-mini` model provides sufficient accuracy for tender normalization at a fraction of the cost.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 

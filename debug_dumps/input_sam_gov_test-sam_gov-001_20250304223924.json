@@ -1,0 +1,24 @@
+{
+  "id": "test-sam_gov-001",
+  "source_table": "sam_gov",
+  "title": "Test tender with special chars: apostrophe's, quotes\", and em-dash—plus accented chars éèçà",
+  "description": "\n        This is a test tender description with various special characters:\n        • Bullets and lists\n        • Single quotes: ' and ' and ‛\n        • Double quotes: \" and \" and „\n        • Dashes: - and – and — \n        • Other symbols: … © ® ™ € £ ¥ ÷ × \n        • Accented: àáâãäåçèéêëìíîïñòóôõöùúûüýÿ\n        ",
+  "publication_date": "2025-03-04T22:39:24.f",
+  "deadline_date": null,
+  "country": "United States",
+  "organization_name": "Test Organization & Partners, LLC.",
+  "source_data": null,
+  "raw_tender": {
+    "id": "test-sam_gov-001",
+    "source_table": "sam_gov",
+    "title": "Test tender with special chars: apostrophe's, quotes\", and em-dash—plus accented chars éèçà",
+    "description": "\n        This is a test tender description with various special characters:\n        • Bullets and lists\n        • Single quotes: ' and ' and ‛\n        • Double quotes: \" and \" and „\n        • Dashes: - and – and — \n        • Other symbols: … © ® ™ € £ ¥ ÷ × \n        • Accented: àáâãäåçèéêëìíîïñòóôõöùúûüýÿ\n        ",
+    "publication_date": "2025-03-04T22:39:24.f",
+    "country": "United States",
+    "organization_name": "Test Organization & Partners, LLC.",
+    "url": "https://example.com/tender/123",
+    "normalized": false,
+    "processed": false,
+    "nested_data": "{'complex_field': {'array_with_mixed_types': [1, 'two', 3.0, None, {'key': 'value'}], 'empty_list': [], 'problematic_string': 'Problem string with null bytes: \\x00\\x00\\x00'}}"
+  }
+}

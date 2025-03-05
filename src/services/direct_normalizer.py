@@ -27,13 +27,13 @@ logger = logging.getLogger(__name__)
 class DirectNormalizer:
     """Direct implementation of tender normalization using OpenAI API."""
     
-    def __init__(self, api_key: str, model: str = "gpt-4o", max_retries: int = 3, retry_delay: int = 2):
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini", max_retries: int = 3, retry_delay: int = 2):
         """
         Initialize the normalizer with OpenAI API key.
 
         Args:
             api_key: OpenAI API key
-            model: OpenAI model to use, default is gpt-4o
+            model: OpenAI model to use, default is gpt-4o-mini
             max_retries: Maximum number of retry attempts for API calls
             retry_delay: Delay between retries in seconds
         """

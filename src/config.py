@@ -58,6 +58,9 @@ class NormalizerConfig(BaseModel):
     # Mode settings
     mode: Literal["strict", "relaxed"] = Field(default="relaxed")
     
+    # Debug settings
+    save_debug_data: bool = Field(default=True)
+    
     # Source-specific settings
     use_llm_for_sources: dict[str, bool] = Field(
         default_factory=lambda: {

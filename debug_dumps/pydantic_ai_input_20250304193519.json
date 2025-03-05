@@ -1,0 +1,13 @@
+{
+  "raw_tender": {
+    "id": "test-sam_gov-001",
+    "source_table": "sam_gov",
+    "title": "Test tender with special chars",
+    "description": "This is a test tender description.",
+    "publication_date": "2025-03-04T19:35:19.869525",
+    "country": "United States",
+    "organization_name": "Test Organization",
+    "url": "https://example.com/tender/123"
+  },
+  "source_table": "sam_gov"
+}
