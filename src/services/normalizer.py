@@ -8,7 +8,7 @@ import os
 import re
 import string
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, TypeVar, Union
 import pprint
 import unicodedata
@@ -646,6 +646,7 @@ class TenderNormalizer:
             "iadb": "International",  # Inter-American Development Bank
             "afdb": "International",  # African Development Bank
             "aiib": "International",  # Asian Infrastructure Investment Bank
+            "adb": "International"    # Asian Development Bank
         }
         
         # Apply default country if not set and available in defaults
@@ -677,6 +678,10 @@ class TenderNormalizer:
             
             if "location" in source_data and (not normalized_data.get("country") or normalized_data.get("country") == ""):
                 normalized_data["country"] = source_data["location"]
+            
+            # Default to "International" if no country found
+            if not normalized_data.get("country") or normalized_data.get("country") == "":
+                normalized_data["country"] = "International"
         
         # Asian Development Bank specific fields
         elif source_table == "adb":
@@ -684,21 +689,28 @@ class TenderNormalizer:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
             
-            # Ensure title is set
+            # Ensure title is set - critical for ADB tenders based on logs
             if (not normalized_data.get("title") or normalized_data.get("title") == ""):
-                if "project_name" in source_data:
+                if "project_name" in source_data and source_data["project_name"]:
                     normalized_data["title"] = source_data["project_name"]
-                elif "name" in source_data:
+                elif "name" in source_data and source_data["name"]:
                     normalized_data["title"] = source_data["name"]
-                elif "project_title" in source_data:
+                elif "project_title" in source_data and source_data["project_title"]:
                     normalized_data["title"] = source_data["project_title"]
-                elif "subject" in source_data:
+                elif "subject" in source_data and source_data["subject"]:
                     normalized_data["title"] = source_data["subject"]
                 else:
                     # Create a title from project number and country if available
                     project_number = source_data.get("project_number") or normalized_data.get("id") or "Unknown"
                     country = normalized_data.get("country") or "Unknown Location"
                     normalized_data["title"] = f"ADB Project {project_number} - {country}"
+            
+            # Ensure country is set for ADB
+            if not normalized_data.get("country") or normalized_data.get("country") == "":
+                if "country" in source_data and source_data["country"]:
+                    normalized_data["country"] = source_data["country"]
+                else:
+                    normalized_data["country"] = "International"
         
         # TED EU specific fields
         elif source_table == "ted_eu":
@@ -733,17 +745,19 @@ class TenderNormalizer:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
             
-            # Fix date parsing for AFD tenders
+            # Fix date parsing for AFD tenders - critical issue based on logs
             if "publication_date" in normalized_data and isinstance(normalized_data["publication_date"], str):
                 try:
                     # Handle various date formats
                     date_str = normalized_data["publication_date"]
                     if "," in date_str:  # Format like "Feb 6, 2025"
                         from dateutil import parser
-                        normalized_data["publication_date"] = parser.parse(date_str).date()
+                        parsed_date = parser.parse(date_str).strftime("%Y-%m-%d")
+                        normalized_data["publication_date"] = parsed_date
                 except Exception as e:
                     self.logger.warning(f"Failed to parse publication_date for AFD tender: {e}")
-                    normalized_data["publication_date"] = datetime.now().date()
+                    # Use current date as fallback
+                    normalized_data["publication_date"] = datetime.now().strftime("%Y-%m-%d")
             
             if "deadline_date" in normalized_data and isinstance(normalized_data["deadline_date"], str):
                 try:
@@ -751,9 +765,12 @@ class TenderNormalizer:
                     date_str = normalized_data["deadline_date"]
                     if "," in date_str:  # Format like "Feb 6, 2025"
                         from dateutil import parser
-                        normalized_data["deadline_date"] = parser.parse(date_str).date()
+                        parsed_date = parser.parse(date_str).strftime("%Y-%m-%d")
+                        normalized_data["deadline_date"] = parsed_date
                 except Exception as e:
                     self.logger.warning(f"Failed to parse deadline_date for AFD tender: {e}")
+                    # Use a future date as fallback for deadline
+                    normalized_data["deadline_date"] = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
         
         # Inter-American Development Bank specific fields
         elif source_table == "iadb":
@@ -761,18 +778,28 @@ class TenderNormalizer:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
             
-            # Ensure title is set
+            # Ensure title is set for IADB - critical based on logs
             if (not normalized_data.get("title") or normalized_data.get("title") == ""):
-                if "project_name" in source_data:
+                if "project_name" in source_data and source_data["project_name"]:
                     normalized_data["title"] = source_data["project_name"]
-                elif "operation_name" in source_data:
+                elif "operation_name" in source_data and source_data["operation_name"]:
                     normalized_data["title"] = source_data["operation_name"]
-                elif "name" in source_data:
+                elif "name" in source_data and source_data["name"]:
                     normalized_data["title"] = source_data["name"]
                 else:
                     # Create a title from operation number if available
                     operation_num = source_data.get("operation_number") or normalized_data.get("id") or "Unknown"
-                    normalized_data["title"] = f"IADB Project {operation_num}"
+                    country = normalized_data.get("country") or "International"
+                    normalized_data["title"] = f"IADB Project {operation_num} - {country}"
+            
+            # Ensure country is set
+            if not normalized_data.get("country") or normalized_data.get("country") == "":
+                if "country" in source_data and source_data["country"]:
+                    normalized_data["country"] = source_data["country"]
+                elif "operation_country" in source_data:
+                    normalized_data["country"] = source_data["operation_country"]
+                else:
+                    normalized_data["country"] = "International"
         
         # African Development Bank specific fields
         elif source_table == "afdb":
@@ -785,6 +812,13 @@ class TenderNormalizer:
                 normalized_data["country"] = source_data["country"]
             elif "country_name" in source_data and source_data["country_name"]:
                 normalized_data["country"] = source_data["country_name"]
+            else:
+                normalized_data["country"] = "International"
+            
+            # Fix date parsing for AFDB tenders - critical based on logs
+            if "publication_date" in normalized_data and normalized_data["publication_date"] in ["Unknown", "unknown", ""]:
+                # Use current date as fallback for publication date
+                normalized_data["publication_date"] = datetime.now().strftime("%Y-%m-%d")
         
         # Asian Infrastructure Investment Bank specific fields
         elif source_table == "aiib":
@@ -795,6 +829,8 @@ class TenderNormalizer:
             # Extract country from borrower if available
             if "borrower" in source_data and (not normalized_data.get("country") or normalized_data.get("country") == ""):
                 normalized_data["country"] = source_data["borrower"]
+            else:
+                normalized_data["country"] = "International"  # Default for AIIB
         
         # Handle any missing required fields for all sources
         if not normalized_data.get("country") or normalized_data.get("country") == "":
