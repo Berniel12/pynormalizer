@@ -659,7 +659,7 @@ class TenderNormalizer:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
             
-            # Set United States as the country for all sam.gov tenders
+            # ALWAYS set United States as the country for all sam.gov tenders
             normalized_data["country"] = "United States"
             
             # Try to extract organization name from agency field if not already set
@@ -673,10 +673,10 @@ class TenderNormalizer:
                     normalized_data[field] = source_data[field]
             
             # Extract country from borrower or location fields if available
-            if "borrower" in source_data and (not normalized_data.get("country") or normalized_data.get("country") == ""):
+            if "borrower" in source_data and source_data.get("borrower") and (not normalized_data.get("country") or normalized_data.get("country") == ""):
                 normalized_data["country"] = source_data["borrower"]
             
-            if "location" in source_data and (not normalized_data.get("country") or normalized_data.get("country") == ""):
+            if "location" in source_data and source_data.get("location") and (not normalized_data.get("country") or normalized_data.get("country") == ""):
                 normalized_data["country"] = source_data["location"]
             
             # Default to "International" if no country found
@@ -690,14 +690,14 @@ class TenderNormalizer:
                     normalized_data[field] = source_data[field]
             
             # Ensure title is set - critical for ADB tenders based on logs
-            if (not normalized_data.get("title") or normalized_data.get("title") == ""):
-                if "project_name" in source_data and source_data["project_name"]:
+            if not normalized_data.get("title") or normalized_data.get("title") == "":
+                if source_data.get("project_name"):
                     normalized_data["title"] = source_data["project_name"]
-                elif "name" in source_data and source_data["name"]:
+                elif source_data.get("name"):
                     normalized_data["title"] = source_data["name"]
-                elif "project_title" in source_data and source_data["project_title"]:
+                elif source_data.get("project_title"):
                     normalized_data["title"] = source_data["project_title"]
-                elif "subject" in source_data and source_data["subject"]:
+                elif source_data.get("subject"):
                     normalized_data["title"] = source_data["subject"]
                 else:
                     # Create a title from project number and country if available
@@ -707,7 +707,7 @@ class TenderNormalizer:
             
             # Ensure country is set for ADB
             if not normalized_data.get("country") or normalized_data.get("country") == "":
-                if "country" in source_data and source_data["country"]:
+                if source_data.get("country"):
                     normalized_data["country"] = source_data["country"]
                 else:
                     normalized_data["country"] = "International"
@@ -718,13 +718,13 @@ class TenderNormalizer:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
             
-            # Set EU as country if not specified
+            # ALWAYS set EU as country - critical based on logs
             normalized_data["country"] = "European Union"
             
             # Try to extract specific EU country if available
-            if "country" in source_data and source_data["country"]:
+            if source_data.get("country"):
                 normalized_data["country"] = source_data["country"]
-            elif "member_state" in source_data and source_data["member_state"]:
+            elif source_data.get("member_state"):
                 normalized_data["country"] = source_data["member_state"]
         
         # UN Global Marketplace specific fields
@@ -733,8 +733,8 @@ class TenderNormalizer:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
             
-            # Extract country from vendor_country if available
-            if "vendor_country" in source_data and source_data["vendor_country"]:
+            # ALWAYS set a country value for UNGM - critical based on logs
+            if source_data.get("vendor_country"):
                 normalized_data["country"] = source_data["vendor_country"]
             else:
                 normalized_data["country"] = "International"  # Default for UNGM
@@ -744,6 +744,13 @@ class TenderNormalizer:
             for field in ["country_code", "project_ref", "submission_method", "language_code"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Ensure country is set
+            if not normalized_data.get("country") or normalized_data.get("country") == "":
+                if source_data.get("country"):
+                    normalized_data["country"] = source_data["country"]
+                else:
+                    normalized_data["country"] = "France"  # Default for AFD
             
             # Fix date parsing for AFD tenders - critical issue based on logs
             if "publication_date" in normalized_data and isinstance(normalized_data["publication_date"], str):
@@ -771,13 +778,6 @@ class TenderNormalizer:
                     self.logger.warning(f"Failed to parse deadline_date for AFD tender: {e}")
                     # Use a future date as fallback for deadline
                     normalized_data["deadline_date"] = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-            
-            # Ensure country is set for AFD tenders
-            if not normalized_data.get("country") or normalized_data.get("country") == "":
-                if "country" in source_data and source_data["country"]:
-                    normalized_data["country"] = source_data["country"]
-                else:
-                    normalized_data["country"] = "France"  # Default for AFD
         
         # Inter-American Development Bank specific fields
         elif source_table == "iadb":
@@ -786,12 +786,12 @@ class TenderNormalizer:
                     normalized_data[field] = source_data[field]
             
             # Ensure title is set for IADB - critical based on logs
-            if (not normalized_data.get("title") or normalized_data.get("title") == ""):
-                if "project_name" in source_data and source_data["project_name"]:
+            if not normalized_data.get("title") or normalized_data.get("title") == "":
+                if source_data.get("project_name"):
                     normalized_data["title"] = source_data["project_name"]
-                elif "operation_name" in source_data and source_data["operation_name"]:
+                elif source_data.get("operation_name"):
                     normalized_data["title"] = source_data["operation_name"]
-                elif "name" in source_data and source_data["name"]:
+                elif source_data.get("name"):
                     normalized_data["title"] = source_data["name"]
                 else:
                     # Create a title from operation number if available
@@ -801,9 +801,9 @@ class TenderNormalizer:
             
             # Ensure country is set
             if not normalized_data.get("country") or normalized_data.get("country") == "":
-                if "country" in source_data and source_data["country"]:
+                if source_data.get("country"):
                     normalized_data["country"] = source_data["country"]
-                elif "operation_country" in source_data:
+                elif source_data.get("operation_country"):
                     normalized_data["country"] = source_data["operation_country"]
                 else:
                     normalized_data["country"] = "International"
@@ -815,15 +815,15 @@ class TenderNormalizer:
                     normalized_data[field] = source_data[field]
             
             # Extract country if available
-            if "country" in source_data and source_data["country"]:
+            if source_data.get("country"):
                 normalized_data["country"] = source_data["country"]
-            elif "country_name" in source_data and source_data["country_name"]:
+            elif source_data.get("country_name"):
                 normalized_data["country"] = source_data["country_name"]
             else:
                 normalized_data["country"] = "International"
             
             # Fix date parsing for AFDB tenders - critical based on logs
-            if "publication_date" in normalized_data and normalized_data["publication_date"] in ["Unknown", "unknown", ""]:
+            if "publication_date" in normalized_data and normalized_data.get("publication_date") in ["Unknown", "unknown", ""]:
                 # Use current date as fallback for publication date
                 normalized_data["publication_date"] = datetime.now().strftime("%Y-%m-%d")
         
@@ -833,8 +833,8 @@ class TenderNormalizer:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
             
-            # Extract country from borrower if available
-            if "borrower" in source_data and (not normalized_data.get("country") or normalized_data.get("country") == ""):
+            # ALWAYS set a country value for AIIB - critical based on logs
+            if source_data.get("borrower"):
                 normalized_data["country"] = source_data["borrower"]
             else:
                 normalized_data["country"] = "International"  # Default for AIIB
