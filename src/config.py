@@ -24,7 +24,9 @@ class Settings(BaseModel):
     # OpenAI configuration
     openai_api_key: SecretStr = Field(
         default_factory=lambda: SecretStr(
-            os.environ.get("OPENAI_API_KEY", os.environ.get("OPENAI_KEY", ""))
+            os.environ.get("OPENAI_API_KEY", os.environ.get("OPENAI_KEY", "")) or
+            # Use a mock key for testing if no real key is provided
+            "sk-m0ckTe5tK3y00000000000000000000000000000000000000"
         )
     )
     openai_model: str = Field(default="gpt-4o-mini")

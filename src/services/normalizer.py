@@ -270,11 +270,18 @@ class NormalizationOutput(BaseModel):
     notes: Optional[str] = Field(
         None, description="Any notes or explanations about the normalization process"
     )
+    error: Optional[str] = Field(
+        None, description="Error message if normalization failed"
+    )
     
     # Field validation
     @model_validator(mode="after")
     def validate_tender_fields(self) -> "NormalizationOutput":
         """Validate that the tender has required fields and correct types."""
+        # Skip validation if there was an error
+        if self.error:
+            return self
+            
         required_fields = ["title", "source_table", "source_id"]
         for field in required_fields:
             if field not in self.tender:
@@ -333,765 +340,407 @@ class NormalizationOutput(BaseModel):
 
 
 class TenderNormalizer:
-    """Service for normalizing tender data using PydanticAI."""
-
+    """
+    Service for normalizing tender data using pure Pydantic parsing.
+    """
+    
     def __init__(self):
-        """Initialize the tender normalizer."""
+        """Initialize the TenderNormalizer."""
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing TenderNormalizer")
         
         # Add config attribute
         self.config = NormalizerConfig()
-        
-        # Set up OpenAI API key
-        if not os.environ.get("OPENAI_API_KEY"):
-            self.logger.info("Setting OpenAI API key from config")
-            if "OPENAI_KEY" in os.environ:
-                os.environ["OPENAI_API_KEY"] = os.environ["OPENAI_KEY"]
-            elif settings.openai_api_key.get_secret_value():
-                os.environ["OPENAI_API_KEY"] = settings.openai_api_key.get_secret_value()
-                
-        # Set up the agent for normalization with system_prompt
-        try:
-            self.logger.info(f"Creating PydanticAI agent with model: {settings.openai_model}")
-            self.agent = Agent(
-                model=settings.openai_model,
-                result_type=NormalizationOutput,
-                system_prompt=self._get_system_prompt(),
-            )
-            self.logger.info("PydanticAI agent created successfully")
-        except Exception as e:
-            self.logger.error(f"Failed to create PydanticAI agent: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            # We'll continue initialization but the agent will be created on first use
-            self.agent = None
-        
+            
         # Performance tracking
         self.performance_stats = {
             "total_processed": 0,
-            "llm_used": 0,
-            "fallback_used": 0,
+            "normalization_time": 0,
             "success_rate": 0,
-            "avg_processing_time": 0,
-            "total_processing_time": 0,
-            "by_source": {},
         }
-
-    def _get_system_prompt(self) -> str:
-        """Get the system prompt for the LLM."""
-        return """
-        You are a specialized AI assistant for tender normalization.
-        
-        Your task is to normalize tender data from different sources into a consistent format.
-        You will be given raw tender data and your goal is to extract and standardize the following fields:
-        
-        Required fields:
-        - title: Short, descriptive title of the tender opportunity (in proper title case, not all caps)
-        - source_table: The original data source (e.g., "sam_gov", "wb", "adb", etc.)
-        - source_id: Original identifier of the tender in the source system
-        
-        Important fields to extract (if available):
-        - description: Detailed description of what the tender requires
-        - tender_type: Type of tender (goods, services, works, consulting, mixed, other, unknown)
-        - status: Current status (active, closed, awarded, canceled, upcoming, unknown)
-        - publication_date: When the tender was published
-        - deadline_date: Submission deadline
-        - country: Country where the work/services will be performed
-        - city: Specific city or location
-        - organization_name: Name of the organization issuing the tender
-        - organization_id: ID of the issuing organization
-        - buyer: Entity making the purchase (often same as organization_name)
-        - project_name: Name of the overall project
-        - project_id: ID of the project
-        - project_number: Reference number for the project
-        - sector: Business/industry sector
-        - estimated_value: Monetary value of the tender
-        - currency: Currency of the tender value
-        - contact information:
-          - contact_name: Name of the contact person
-          - contact_email: Email address for inquiries
-          - contact_phone: Phone number for inquiries
-          - contact_address: Physical contact address
-        - url: Main URL of the tender notice
-        - document_links: Links to tender documents
-        - language: Original language of the tender
-        - notice_id: ID of the specific notice
-        - reference_number: Reference number for the tender
-        - procurement_method: Method used for procurement
-        
-        Guidelines for normalization:
-        1. Extract ALL available fields from the raw data, even if they seem redundant.
-        2. Format titles in proper Title Case, not ALL CAPS. Preserve recognized acronyms.
-        3. Clean up excessive numbers and codes from titles while preserving essential information.
-        4. Remove excessive punctuation and special characters from all text fields.
-        5. If text appears to be in a language other than English, note this in the 'language' field.
-        6. EXTREMELY IMPORTANT: Look for URLs in ALL fields, especially description fields and source_data. Extract any URLs found and include them in the url field.
-        7. EXTREMELY IMPORTANT: Look for contact information (email, phone, address) throughout the data and make sure to extract it.
-        8. Check both direct fields and nested fields in source_data for all relevant information.
-        
-        For each field, always choose the most specific and accurate value from the raw data.
-        If a field is not available in the raw data, do not include it in the output.
-        
-        For date fields, provide standardized ISO format (YYYY-MM-DD) when possible.
-        For status fields, normalize to one of: active, closed, awarded, canceled, upcoming, unknown.
-        For tender_type fields, normalize to one of: goods, services, works, consulting, mixed, other, unknown.
-        
-        Your response should follow the exact structure expected, with proper field types and values.
-        """
-
-    def _should_use_llm(self, tender: RawTender) -> tuple[bool, str]:
-        """
-        Determine if LLM normalization should be used based on tender contents.
-        
-        Args:
-            tender: The raw tender data
-            
-        Returns:
-            Tuple of (should_use_llm, reason)
-        """
-        # Check source-specific configuration
-        source_setting = normalizer_config.use_llm_for_sources.get(
-            tender.source_table,
-            normalizer_config.use_llm_for_sources.get("_default", True)
-        )
-        
-        if not source_setting:
-            return False, f"LLM disabled for source: {tender.source_table}"
-        
-        # Check for missing critical fields - if any are missing, definitely use LLM
-        missing_critical = []
-        for field in normalizer_config.critical_fields:
-            value = getattr(tender, field, None)
-            if not value or str(value).strip() == "":
-                missing_critical.append(field)
-        
-        if missing_critical:
-            return True, f"Missing critical fields: {', '.join(missing_critical)}"
-        
-        # Very large tenders might exceed token limits and should use fallback
-        if tender.description and len(tender.description) > 15000:
-            return False, "Description too long for LLM processing"
-        
-        # Extremely minimal content tenders
-        if (tender.description and len(tender.description) < 50 and 
-                tender.title and len(tender.title) < 20):
-            return False, "Tender content is minimal, using direct parsing"
-        
-        # Default to using LLM
-        return True, "Default processing path"
-
+    
     def _save_debug_data(self, data: Any, data_type: str) -> None:
         """
         Save debug data to a file.
         
         Args:
             data: The data to save
-            data_type: The type of data (input, output, error, messages)
+            data_type: The type of data (input, output, error, etc.)
         """
         if not self.config.save_debug_data:
             return
             
+        # Create debug directory if it doesn't exist
+        debug_dir = Path("debug_dumps")
+        debug_dir.mkdir(exist_ok=True)
+        
+        # Create filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        filename = f"{data_type}_{timestamp}.json"
+        
+        # If it's input data, add source and ID
+        if isinstance(data, NormalizationInput) and data_type == "input":
+            source = data.source_table
+            tender_id = data.id
+            filename = f"input_{source}_{tender_id}_{timestamp}.json"
+        
+        # Save data to file
+        file_path = debug_dir / filename
+        
         try:
-            # Create debug directory if it doesn't exist
-            debug_dir = Path("debug_dumps")
-            debug_dir.mkdir(exist_ok=True)
-            
-            # Get tender ID and source from data if available
-            tender_id = None
-            source = None
-            
-            if isinstance(data, dict):
-                tender_id = data.get("id")
-                source = data.get("source_table")
-            elif hasattr(data, "id") and hasattr(data, "source_table"):
-                tender_id = data.id
-                source = data.source_table
-            elif hasattr(data, "normalized_data") and isinstance(data.normalized_data, dict):
-                tender_id = data.normalized_data.get("id")
-                source = data.normalized_data.get("source_table")
-                
-            if not tender_id or not source:
-                # Use timestamp as fallback
-                timestamp = time.strftime("%Y%m%d%H%M%S")
-                filename = f"{data_type}_{timestamp}.json"
-            else:
-                # Create filename with tender ID, source, and timestamp
-                timestamp = time.strftime("%Y%m%d%H%M%S")
-                filename = f"{data_type}_{source}_{tender_id}_{timestamp}.json"
-            
             # Convert data to JSON
             if hasattr(data, "model_dump"):
                 json_data = data.model_dump()
-            elif isinstance(data, dict):
+            elif isinstance(data, (dict, list)):
                 json_data = data
             else:
                 json_data = {"data": str(data)}
-            
-            # Save to file
-            with open(debug_dir / filename, "w", encoding="utf-8") as f:
+                
+            # Write to file
+            with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(json_data, f, indent=2, ensure_ascii=False, default=str)
                 
-            self.logger.info(f"Saved debug data to {debug_dir / filename}")
+            self.logger.info(f"Saved debug data to {file_path}")
         except Exception as e:
             self.logger.error(f"Failed to save debug data: {str(e)}")
-            self.logger.error(traceback.format_exc())
-
-    async def _normalize_with_llm(self, input_data: NormalizationInput) -> NormalizationOutput:
-        """
-        Normalize a tender using the LLM.
-        
-        Args:
-            input_data: The input data for normalization
-            
-        Returns:
-            The normalized output
-        """
-        tender_id = input_data.id
-        source = input_data.source_table
-        
-        self.logger.info(f"Normalizing tender {tender_id} from {source} with LLM")
-        
-        # Save debug data if enabled
-        if self.config.save_debug_data:
-            self._save_debug_data(input_data, "input")
-        
-        try:
-            # Try using PydanticAI first
-            self.logger.info(f"Attempting to normalize with PydanticAI")
-            output = await self.agent.run(input_data)
-            self.logger.info(f"PydanticAI normalization successful")
-            
-            # Save debug data if enabled
-            if self.config.save_debug_data:
-                self._save_debug_data(output, "output")
-            
-            return output
-        except Exception as e:
-            error_str = str(e)
-            self.logger.error(f"PydanticAI normalization failed: {error_str}")
-            
-            # If the error is related to the "Expected code to be unreachable" issue
-            # or any other PydanticAI serialization problem, use direct approach
-            if "Expected code to be unreachable" in error_str or "serialization" in error_str.lower():
-                self.logger.info(f"Falling back to direct approach for tender {tender_id}")
-                
-                # Create system prompt
-                system_prompt = self._get_system_prompt()
-                
-                # Create user prompt with the tender data
-                user_prompt = f"""
-                Please normalize the following tender data:
-                
-                ```json
-                {json.dumps(input_data.model_dump(), indent=2)}
-                ```
-                
-                Return the normalized data as a JSON object with the following structure:
-                
-                ```json
-                {{
-                  "tender": {{
-                    "title": "Normalized title",
-                    "source_table": "source_name",
-                    "source_id": "source_specific_id",
-                    "description": "Normalized description",
-                    "tender_type": "goods|services|works|consulting|mixed|other|unknown",
-                    "status": "active|closed|awarded|canceled|upcoming|unknown",
-                    "publication_date": "YYYY-MM-DD",
-                    "deadline_date": "YYYY-MM-DD",
-                    "country": "Country name",
-                    "city": "City name",
-                    "organization_name": "Organization name",
-                    "organization_id": "Organization ID",
-                    "buyer": "Buyer name",
-                    "project_name": "Project name",
-                    "project_id": "Project ID",
-                    "project_number": "Project number",
-                    "sector": "Sector",
-                    "estimated_value": 1000.00,
-                    "currency": "USD",
-                    "contact_name": "Contact name",
-                    "contact_email": "contact@example.com",
-                    "contact_phone": "123-456-7890",
-                    "contact_address": "Contact address",
-                    "url": "https://example.com",
-                    "document_links": ["https://example.com/doc1", "https://example.com/doc2"],
-                    "language": "en",
-                    "notice_id": "Notice ID",
-                    "reference_number": "Reference number",
-                    "procurement_method": "Procurement method"
-                  }},
-                  "missing_fields": ["field1", "field2"],
-                  "notes": "Any notes about the normalization process"
-                }}
-                ```
-                
-                Only include fields that are available in the raw data or can be inferred from it.
-                Ensure your response is valid JSON. If there are any special characters, handle them correctly.
-                """
-                
-                # Create messages for OpenAI API
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
-                
-                # Save messages for debugging
-                if self.config.save_debug_data:
-                    debug_data = {
-                        "messages": messages
-                    }
-                    self._save_debug_data(debug_data, "messages")
-                
-                # Call OpenAI API
-                self.logger.info(f"Calling OpenAI API directly")
-                client = openai.AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
-                
-                try:
-                    response = await client.chat.completions.create(
-                        model=settings.openai_model,
-                        messages=messages,
-                        temperature=0.1,
-                        max_tokens=4000
-                    )
-                    
-                    # Extract response content
-                    response_content = response.choices[0].message.content
-                    
-                    # Parse JSON from response
-                    try:
-                        # Extract JSON from the response (it might be wrapped in markdown code blocks)
-                        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response_content)
-                        if json_match:
-                            json_str = json_match.group(1)
-                        else:
-                            json_str = response_content
-                        
-                        # Parse the JSON
-                        normalized_data = json.loads(json_str)
-                        
-                        # Create NormalizationOutput
-                        output = NormalizationOutput(
-                            normalized_data=normalized_data.get("tender", {}),
-                            missing_fields=normalized_data.get("missing_fields", []),
-                            notes=normalized_data.get("notes", "Normalized using direct approach"),
-                            error=None
-                        )
-                        
-                        # Save debug data if enabled
-                        if self.config.save_debug_data:
-                            self._save_debug_data(output, "output")
-                        
-                        return output
-                    except json.JSONDecodeError as json_err:
-                        self.logger.error(f"Failed to parse JSON from response: {str(json_err)}")
-                        self.logger.error(f"Response content: {response_content}")
-                        
-                        # Create error output
-                        output = NormalizationOutput(
-                            normalized_data={},
-                            missing_fields=[],
-                            notes="Failed to parse JSON from response",
-                            error=f"JSON parse error: {str(json_err)}"
-                        )
-                        
-                        # Save debug data if enabled
-                        if self.config.save_debug_data:
-                            self._save_debug_data(output, "error")
-                        
-                        return output
-                except Exception as api_err:
-                    self.logger.error(f"OpenAI API call failed: {str(api_err)}")
-                    
-                    # Create error output
-                    output = NormalizationOutput(
-                        normalized_data={},
-                        missing_fields=[],
-                        notes="OpenAI API call failed",
-                        error=f"API error: {str(api_err)}"
-                    )
-                    
-                    # Save debug data if enabled
-                    if self.config.save_debug_data:
-                        error_data = {
-                            "error": str(api_err),
-                            "traceback": traceback.format_exc()
-                        }
-                        self._save_debug_data(error_data, "error")
-                    
-                    return output
-            else:
-                # Re-raise if not a serialization error
-                raise
-        except Exception as e:
-            self.logger.error(f"Error in _normalize_with_llm: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            
-            # Save debug data if enabled
-            if self.config.save_debug_data:
-                error_data = {
-                    "error": str(e),
-                    "traceback": traceback.format_exc()
-                }
-                self._save_debug_data(error_data, "error")
-            
-            # Return error output
-            return NormalizationOutput(
-                normalized_data={},
-                missing_fields=[],
-                notes="Normalization failed",
-                error=str(e)
-            )
-
-    def _identify_json_serialization_issues(self, data: Dict[str, Any]) -> None:
-        """
-        Attempt to identify fields that cause JSON serialization issues.
-        
-        Args:
-            data: The data to check for serialization issues
-        """
-        self.logger.debug("Identifying JSON serialization issues...")
-        
-        # Check each top-level field
-        for key, value in data.items():
-            try:
-                json.dumps({key: value})
-                self.logger.debug(f"  Field '{key}' serializes OK")
-            except Exception as e:
-                self.logger.error(f"  Field '{key}' has serialization issue: {str(e)}")
-                
-                # If it's a dictionary, check each sub-field
-                if isinstance(value, dict):
-                    for sub_key, sub_value in value.items():
-                        try:
-                            json.dumps({sub_key: sub_value})
-                            self.logger.debug(f"    Sub-field '{key}.{sub_key}' serializes OK")
-                        except Exception as e:
-                            self.logger.error(f"    Sub-field '{key}.{sub_key}' has serialization issue: {str(e)}")
-                
-                # If it's a list, check each element
-                elif isinstance(value, list):
-                    for i, item in enumerate(value):
-                        try:
-                            json.dumps(item)
-                            self.logger.debug(f"    List item '{key}[{i}]' serializes OK")
-                        except Exception as e:
-                            self.logger.error(f"    List item '{key}[{i}]' has serialization issue: {str(e)}")
     
-    def _validate_normalized_output(self, output: NormalizationOutput, input_data: NormalizationInput) -> None:
+    def _create_normalization_input(self, tender: RawTender) -> NormalizationInput:
         """
-        Validate that the normalized output contains all required fields.
-        
-        Args:
-            output: The normalization output to validate
-            input_data: The original input data
-        """
-        if not output or not hasattr(output, "normalized_data"):
-            self.logger.error("Normalized output is missing or invalid")
-            return
-        
-        # Check for essential fields
-        normalized_data = output.normalized_data
-        essential_fields = ["title", "description", "country", "source_table", "id", "organization_name"]
-        
-        for field in essential_fields:
-            if field not in normalized_data or not normalized_data[field]:
-                self.logger.warning(f"Normalized data is missing essential field: {field}")
-                
-                # Use input value as fallback if available
-                raw_tender = input_data.model_dump().get("raw_tender", {})
-                if field in raw_tender and raw_tender[field]:
-                    normalized_data[field] = raw_tender[field]
-            # If tender type contains certain keywords, map accordingly
-            tender_type_lower = tender_type.lower()
-            if any(word in tender_type_lower for word in ["good", "supply", "product", "equipment"]):
-                normalized_data["tender_type"] = "goods"
-            elif any(word in tender_type_lower for word in ["service", "maintenance"]):
-                normalized_data["tender_type"] = "services"
-            elif any(word in tender_type_lower for word in ["work", "construction", "build"]):
-                normalized_data["tender_type"] = "works"
-            elif any(word in tender_type_lower for word in ["consult", "advisory"]):
-                normalized_data["tender_type"] = "consulting"
-            else:
-                # Default to "other" if we can't determine the type
-                normalized_data["tender_type"] = "other"
-        else:
-            # If no tender type, try to infer from other fields
-            description = normalized_data.get("description", "")
-            title = normalized_data.get("title", "")
-            
-            if description or title:
-                combined_text = (description + " " + title).lower()
-                if any(word in combined_text for word in ["good", "supply", "product", "equipment"]):
-                    normalized_data["tender_type"] = "goods"
-                elif any(word in combined_text for word in ["service", "maintenance"]):
-                    normalized_data["tender_type"] = "services"
-                elif any(word in combined_text for word in ["work", "construction", "build"]):
-                    normalized_data["tender_type"] = "works"
-                elif any(word in combined_text for word in ["consult", "advisory"]):
-                    normalized_data["tender_type"] = "consulting"
-                else:
-                    normalized_data["tender_type"] = "unknown"
-            else:
-                normalized_data["tender_type"] = "unknown"
-
-    def _ensure_valid_status(self, normalized_data: Dict[str, Any]) -> None:
-        """
-        Ensure the status is valid.
-        
-        Args:
-            normalized_data: The normalized data dictionary
-        """
-        valid_statuses = ["active", "closed", "awarded", "canceled", "upcoming", "unknown"]
-        
-        # Handle incorrect tender type in status field
-        if "status" in normalized_data and normalized_data["status"]:
-            if isinstance(normalized_data["status"], str):
-                status_lower = normalized_data["status"].lower()
-                
-                # Handle common procurement methods that should not be in status
-                procurement_methods = [
-                    "request for proposal", "request for quotation", "invitation to bid", 
-                    "call for individual consultants", "request for expression of interest",
-                    "expression of interest", "rfi", "rfp", "rfq", "itb"
-                ]
-                
-                if status_lower in procurement_methods:
-                    # Move this value to tender_type if it's a procurement method
-                    if status_lower not in valid_statuses:
-                        # Save this as procurement_method if no value exists
-                        if "procurement_method" not in normalized_data or not normalized_data["procurement_method"]:
-                            normalized_data["procurement_method"] = normalized_data["status"]
-                        
-                        # Also use this value for tender_type if none exists
-                        if "tender_type" not in normalized_data or not normalized_data["tender_type"]:
-                            normalized_data["tender_type"] = normalized_data["status"]
-                        
-                        # Reset status to a valid value (will be set by date inference)
-                        normalized_data["status"] = "unknown"
-                
-                # If still invalid, set to unknown
-                if normalized_data["status"].lower() not in valid_statuses:
-                    normalized_data["status"] = "unknown"
-        
-        # Always re-apply date-based status inference as a last resort
-        if "status" not in normalized_data or normalized_data["status"] == "unknown":
-            self._infer_status_from_dates(normalized_data)
-
-    async def normalize_tender(self, tender: RawTender, save_debug: bool = False) -> Dict[str, Any]:
-        """
-        Normalize a single tender.
+        Create a NormalizationInput object from a RawTender.
         
         Args:
             tender: The raw tender data
+            
+        Returns:
+            NormalizationInput object
+        """
+        return NormalizationInput(
+            id=tender.id,
+            source_table=tender.source_table,
+            title=tender.title,
+            description=tender.description,
+            publication_date=tender.publication_date,
+            deadline_date=tender.deadline_date,
+            country=tender.country,
+            organization_name=tender.organization_name,
+            source_data=tender.source_data,
+            raw_tender=tender.model_dump()
+        )
+        
+    async def normalize_tender(self, tender: RawTender, save_debug: bool = True) -> Dict[str, Any]:
+        """
+        Normalize a tender using direct parsing.
+        
+        Args:
+            tender: The tender to normalize
             save_debug: Whether to save debug data
             
         Returns:
-            The normalized tender data
+            Dictionary with normalized data and metadata
         """
-        start_time = time.time()
         tender_id = tender.id
-        source = tender.source_table
+        start_time = time.time()
         
-        self.logger.info(f"Normalizing tender {tender_id} from {source}")
+        self.logger.info(f"Normalizing tender {tender_id} from {tender.source_table}")
         
-        should_use_llm, reason = self._should_use_llm(tender)
+        # Create input data for normalization
+        input_data = self._create_normalization_input(tender)
         
-        if should_use_llm:
-            self.logger.info(f"Using LLM for tender {tender_id}: {reason}")
+        # Save debug data if enabled
+        if save_debug and self.config.save_debug_data:
+            self._save_debug_data(input_data, f"input_{tender.source_table}_{tender_id}")
+        
+        try:
+            # Use direct parsing approach for all tenders
+            self.logger.info(f"Using direct parsing for tender {tender_id}")
             
-            # Prepare the normalization input
-            input_data = NormalizationInput(
-                id=tender.id,
-                source_table=tender.source_table,
-                title=tender.title,
-                description=tender.description,
-                publication_date=tender.publication_date,
-                deadline_date=tender.deadline_date,
-                country=tender.country,
-                organization_name=tender.organization_name,
-                source_data=tender.source_data,
-                raw_tender=tender.model_dump()
-            )
+            # Create normalized data with basic fields
+            normalized_data = {
+                "id": tender.id,
+                "source_table": tender.source_table,
+                "source_id": tender.id,
+                "title": format_title(tender.title or ""),
+                "description": tender.description or "",
+                "country": tender.country or "",
+                "organization_name": tender.organization_name or "",
+            }
             
+            # Detect and translate title if not in English
+            if tender.title:
+                title_lang = detect_language(tender.title)
+                if title_lang != "en" and title_lang != "unknown":
+                    try:
+                        normalized_data["title"] = format_title(translate_to_english(tender.title, title_lang))
+                        normalized_data["original_language"] = title_lang
+                    except Exception as e:
+                        self.logger.warning(f"Failed to translate title: {str(e)}")
+            
+            # Detect and translate description if not in English
+            if tender.description and len(tender.description) > 10:
+                desc_lang = detect_language(tender.description[:1000])  # Only check first 1000 chars for efficiency
+                if desc_lang != "en" and desc_lang != "unknown":
+                    try:
+                        normalized_data["description"] = translate_to_english(tender.description, desc_lang)
+                        normalized_data["original_language"] = desc_lang
+                    except Exception as e:
+                        self.logger.warning(f"Failed to translate description: {str(e)}")
+            
+            # Extract URLs from description
+            if tender.description:
+                urls = extract_urls_from_text(tender.description)
+                if urls:
+                    normalized_data["extracted_urls"] = urls
+            
+            # Extract emails from description
+            if tender.description:
+                emails = extract_emails_from_text(tender.description)
+                if emails:
+                    normalized_data["extracted_emails"] = emails
+            
+            # Add dates if available
+            if hasattr(tender, "publication_date") and tender.publication_date:
+                normalized_data["publication_date"] = tender.publication_date
+            if hasattr(tender, "deadline_date") and tender.deadline_date:
+                normalized_data["deadline_date"] = tender.deadline_date
+            
+            # Extract URL
+            if hasattr(tender, "url") and tender.url:
+                normalized_data["url"] = tender.url
+            
+            # Try to extract additional fields from source_data if available
+            if hasattr(tender, "source_data") and tender.source_data:
+                source_data = tender.source_data
+                
+                # Recursively extract all fields from source_data
+                self._extract_fields_from_source_data(source_data, normalized_data)
+                
+                # Extract URL if available
+                if "url" in source_data:
+                    normalized_data["url"] = source_data["url"]
+                elif "link" in source_data:
+                    normalized_data["url"] = source_data["link"]
+                
+                # Extract tender type if available
+                if "tender_type" in source_data:
+                    normalized_data["tender_type"] = source_data["tender_type"]
+                elif "type" in source_data:
+                    normalized_data["tender_type"] = source_data["type"]
+                elif "procurement_type" in source_data:
+                    normalized_data["tender_type"] = source_data["procurement_type"]
+                else:
+                    normalized_data["tender_type"] = "unknown"
+                
+                # Extract status if available
+                if "status" in source_data:
+                    normalized_data["status"] = source_data["status"]
+                else:
+                    # Infer status from dates
+                    normalized_data["status"] = self._infer_status_from_dates(normalized_data)
+                
+                # Extract organization details if available
+                if "organization" in source_data:
+                    org_data = source_data["organization"]
+                    if isinstance(org_data, dict):
+                        if "name" in org_data and not normalized_data.get("organization_name"):
+                            normalized_data["organization_name"] = org_data["name"]
+                        if "id" in org_data:
+                            normalized_data["organization_id"] = org_data["id"]
+                
+                # Extract specific fields for different source tables
+                self._extract_source_specific_fields(tender.source_table, source_data, normalized_data)
+            
+            # Ensure status is set
+            if "status" not in normalized_data:
+                normalized_data["status"] = self._infer_status_from_dates(normalized_data)
+            
+            # Update metrics
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            return {
+                "normalized_data": normalized_data,
+                "used_llm": False,
+                "method": "direct_parsing",
+                "processing_time": processing_time,
+                "error": None,
+                "missing_fields": [],
+                "notes": "Normalized using direct parsing approach"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error in normalize_tender: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            
+            # Return error output
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            return {
+                "normalized_data": {
+                    "id": tender.id,
+                    "source_table": tender.source_table,
+                    "source_id": tender.id,
+                    "title": tender.title or "",
+                    "description": "Error during normalization",
+                },
+                "used_llm": False,
+                "method": "direct_parsing_error",
+                "processing_time": processing_time,
+                "error": str(e),
+                "missing_fields": [],
+                "notes": f"Normalization failed: {str(e)}"
+            }
+    
+    def _extract_fields_from_source_data(self, source_data: Dict[str, Any], normalized_data: Dict[str, Any]) -> None:
+        """
+        Recursively extract all fields from source_data.
+        
+        Args:
+            source_data: The source data dictionary
+            normalized_data: The normalized data dictionary to update
+        """
+        # Extract direct fields
+        for field in [
+            "buyer", "project_name", "project_id", "project_number", 
+            "sector", "estimated_value", "currency", "contact_name", 
+            "contact_email", "contact_phone", "contact_address", 
+            "document_links", "language", "notice_id", "reference_number", 
+            "procurement_method", "funding_source", "location", "city",
+            "region", "postal_code", "address", "classification",
+            "value", "procurement_category", "award_criteria"
+        ]:
+            if field in source_data:
+                normalized_data[field] = source_data[field]
+        
+        # Look for nested fields with different names
+        for field, nested_fields in {
+            "details": ["value", "category", "method", "criteria", "type", "status"],
+            "dates": ["published", "updated", "closing", "deadline", "award", "start", "end"],
+            "contact": ["name", "email", "phone", "address"],
+            "location": ["country", "city", "region", "address"],
+            "organization": ["name", "id", "type", "address"],
+            "project": ["name", "id", "number", "description"],
+            "value": ["amount", "currency"],
+            "documents": ["urls", "links", "attachments"]
+        }.items():
+            if field in source_data and isinstance(source_data[field], dict):
+                for subfield in nested_fields:
+                    if subfield in source_data[field]:
+                        normalized_data[f"{field}_{subfield}"] = source_data[field][subfield]
+    
+    def _extract_source_specific_fields(self, source_table: str, source_data: Dict[str, Any], normalized_data: Dict[str, Any]) -> None:
+        """
+        Extract fields specific to different source tables.
+        
+        Args:
+            source_table: The source table name
+            source_data: The source data dictionary
+            normalized_data: The normalized data dictionary to update
+        """
+        # Sam.gov specific fields
+        if source_table == "sam_gov":
+            for field in ["notice_id", "solnbr", "agency", "office", "location", "zip", "naics"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+        
+        # World Bank specific fields
+        elif source_table == "wb":
+            for field in ["borrower", "project_id", "loan_number", "selection_method"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+        
+        # Asian Development Bank specific fields
+        elif source_table == "adb":
+            for field in ["project_number", "sector", "loan_number", "closing_date"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+        
+        # TED EU specific fields
+        elif source_table == "ted_eu":
+            for field in ["document_number", "regulation", "notice_type", "award_criteria"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+        
+        # UN Global Marketplace specific fields
+        elif source_table == "ungm":
+            for field in ["reference", "deadline_timezone", "vendor_city", "vendor_country"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+        
+        # AFD Tenders specific fields
+        elif source_table == "afd_tenders":
+            for field in ["country_code", "project_ref", "submission_method", "language_code"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+        
+        # Inter-American Development Bank specific fields
+        elif source_table == "iadb":
+            for field in ["operation_number", "operation_type", "financing_type", "sector_code"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+        
+        # African Development Bank specific fields
+        elif source_table == "afdb":
+            for field in ["country_code", "funding_source", "sector_code", "task_manager"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+        
+        # Asian Infrastructure Investment Bank specific fields
+        elif source_table == "aiib":
+            for field in ["borrower", "sector", "project_status", "project_timeline"]:
+                if field in source_data:
+                    normalized_data[field] = source_data[field]
+    
+    def _infer_status_from_dates(self, data: Dict[str, Any]) -> str:
+        """
+        Infer the tender status from publication and deadline dates.
+        
+        Args:
+            data: The normalized data with dates
+            
+        Returns:
+            The inferred status
+        """
+        today = datetime.now().date()
+        
+        # Parse dates if they exist
+        publication_date = None
+        deadline_date = None
+        
+        if "publication_date" in data and data["publication_date"]:
             try:
-                # Try PydanticAI first
-                self.logger.info(f"Attempting to normalize tender {tender_id} with PydanticAI")
-                try:
-                    # Call the LLM normalization function
-                    output = await self._normalize_with_llm(input_data)
-                    
-                    # Update metrics
-                    self._record_llm_usage(True)
-                    end_time = time.time()
-                    processing_time = end_time - start_time
-                    
-                    return {
-                        "normalized_data": output.normalized_data,
-                        "used_llm": True,
-                        "method": "pydantic_ai",
-                        "processing_time": processing_time,
-                        "error": output.error if hasattr(output, "error") else None,
-                        "missing_fields": output.missing_fields if hasattr(output, "missing_fields") else [],
-                        "notes": output.notes if hasattr(output, "notes") else None
-                    }
-                except Exception as e:
-                    error_str = str(e)
-                    self.logger.error(f"PydanticAI normalization failed: {error_str}")
-                    
-                    # If the error is related to the "Expected code to be unreachable" issue
-                    # or any other PydanticAI serialization problem, try DirectNormalizer
-                    if "Expected code to be unreachable" in error_str or "serialization" in error_str.lower():
-                        self.logger.info(f"Falling back to DirectNormalizer for tender {tender_id}")
-                        
-                        # Import here to avoid circular imports
-                        from .direct_normalizer import DirectNormalizer
-                        
-                        # Initialize DirectNormalizer with API key from settings
-                        direct_normalizer = DirectNormalizer(
-                            api_key=settings.openai_api_key.get_secret_value(),
-                            model=settings.openai_model
-                        )
-                        
-                        try:
-                            # Call DirectNormalizer
-                            direct_result = await direct_normalizer.normalize_tender(
-                                tender.model_dump(), 
-                                save_debug=save_debug
-                            )
-                            
-                            # Update metrics
-                            self._record_llm_usage(True)
-                            end_time = time.time()
-                            processing_time = end_time - start_time
-                            
-                            return {
-                                "normalized_data": direct_result.get("normalized_data", {}),
-                                "used_llm": True,
-                                "method": "direct_normalizer",
-                                "processing_time": processing_time,
-                                "error": None,
-                                "missing_fields": [],
-                                "notes": "Used DirectNormalizer as fallback due to PydanticAI serialization issues"
-                            }
-                        except Exception as direct_error:
-                            self.logger.error(f"DirectNormalizer fallback also failed: {str(direct_error)}")
-                            self.logger.error(traceback.format_exc())
-                            
-                            # Try MockNormalizer as a final fallback
-                            self.logger.info(f"Falling back to MockNormalizer for tender {tender_id}")
-                            
-                            # Import here to avoid circular imports
-                            from .mock_normalizer import MockNormalizer
-                            
-                            # Initialize MockNormalizer
-                            mock_normalizer = MockNormalizer(
-                                api_key=settings.openai_api_key.get_secret_value(),
-                                model=settings.openai_model
-                            )
-                            
-                            try:
-                                # Call MockNormalizer
-                                mock_result = await mock_normalizer.normalize_tender(tender.model_dump())
-                                
-                                # Update metrics
-                                self._record_llm_usage(False)  # Not using LLM for mock
-                                end_time = time.time()
-                                processing_time = end_time - start_time
-                                
-                                return {
-                                    "normalized_data": mock_result.get("normalized_data", {}),
-                                    "used_llm": False,
-                                    "method": "mock_normalizer",
-                                    "processing_time": processing_time,
-                                    "error": None,
-                                    "missing_fields": mock_result.get("missing_fields", []),
-                                    "notes": "Used MockNormalizer as fallback due to API errors"
-                                }
-                            except Exception as mock_error:
-                                self.logger.error(f"MockNormalizer fallback also failed: {str(mock_error)}")
-                                self.logger.error(traceback.format_exc())
-                                # Continue to fallback method
-                    else:
-                        # Re-raise if not a serialization error
-                        raise
-            except Exception as e:
-                self.logger.error(f"LLM normalization failed: {str(e)}")
-                self.logger.error(traceback.format_exc())
+                if isinstance(data["publication_date"], str):
+                    publication_date = datetime.fromisoformat(data["publication_date"]).date()
+                elif isinstance(data["publication_date"], datetime):
+                    publication_date = data["publication_date"].date()
+            except (ValueError, TypeError):
+                pass
                 
-                # Record failure but continue with fallback
-                self._record_llm_usage(False)
-                
-                # Try MockNormalizer as a final fallback for any LLM failure
-                self.logger.info(f"Falling back to MockNormalizer for tender {tender_id} after LLM failure")
-                
-                # Import here to avoid circular imports
-                from .mock_normalizer import MockNormalizer
-                
-                # Initialize MockNormalizer
-                mock_normalizer = MockNormalizer(
-                    api_key=settings.openai_api_key.get_secret_value(),
-                    model=settings.openai_model
-                )
-                
-                try:
-                    # Call MockNormalizer
-                    mock_result = await mock_normalizer.normalize_tender(tender.model_dump())
-                    
-                    # Update metrics
-                    end_time = time.time()
-                    processing_time = end_time - start_time
-                    
-                    return {
-                        "normalized_data": mock_result.get("normalized_data", {}),
-                        "used_llm": False,
-                        "method": "mock_normalizer",
-                        "processing_time": processing_time,
-                        "error": None,
-                        "missing_fields": mock_result.get("missing_fields", []),
-                        "notes": "Used MockNormalizer as fallback due to LLM failure"
-                    }
-                except Exception as mock_error:
-                    self.logger.error(f"MockNormalizer fallback also failed: {str(mock_error)}")
-                    self.logger.error(traceback.format_exc())
-                    # Continue to fallback method
-        else:
-            self.logger.info(f"Using direct parsing for tender {tender_id}: {reason}")
+        if "deadline_date" in data and data["deadline_date"]:
+            try:
+                if isinstance(data["deadline_date"], str):
+                    deadline_date = datetime.fromisoformat(data["deadline_date"]).date()
+                elif isinstance(data["deadline_date"], datetime):
+                    deadline_date = data["deadline_date"].date()
+            except (ValueError, TypeError):
+                pass
         
-        # Fallback to direct parsing or if LLM was disabled
-        self.logger.info(f"Using direct parsing for tender {tender_id}")
+        # Infer status based on dates
+        if deadline_date:
+            if deadline_date < today:
+                return "closed"
+            else:
+                return "active"
+        elif publication_date:
+            if publication_date > today:
+                return "upcoming"
+            else:
+                return "active"
         
-        # Create empty normalized data with original fields
-        normalized_data = {
-            "id": tender.id,
-            "source_table": tender.source_table,
-            "title": tender.title,
-            "description": tender.description,
-            "country": tender.country,
-            "organization_name": tender.organization_name,
-        }
-        
-        # Add dates if available
-        if tender.publication_date:
-            normalized_data["publication_date"] = tender.publication_date
-        if tender.deadline_date:
-            normalized_data["deadline_date"] = tender.deadline_date
-        
-        # Record performance metrics
-        end_time = time.time()
-        processing_time = end_time - start_time
-        
-        return {
-            "normalized_data": normalized_data,
-            "used_llm": False,
-            "method": "direct_parsing",
-            "processing_time": processing_time,
-            "error": "Fallback to direct parsing" if should_use_llm else "Direct parsing used as configured",
-            "missing_fields": [],
-            "notes": "Used fallback method" if should_use_llm else None
-        }
-
-    def normalize_tender_sync(self, tender: RawTender, save_debug: bool = False) -> Dict[str, Any]:
+        # Default status if no dates are available
+        return "unknown"
+    
+    def normalize_tender_sync(self, tender: RawTender, save_debug: bool = True) -> Dict[str, Any]:
         """
         Synchronous wrapper for normalize_tender.
         """
@@ -1106,25 +755,112 @@ class TenderNormalizer:
             
         # Run the async function
         return loop.run_until_complete(self.normalize_tender(tender, save_debug))
-
-    def _record_llm_usage(self, success: bool) -> None:
+    
+    async def normalize_test_batch(self, tenders_by_source: Dict[str, List[RawTender]]) -> Dict[str, List[NormalizationResult]]:
         """
-        Record LLM usage statistics.
+        Normalize a batch of tenders grouped by source for testing purposes.
         
         Args:
-            success: Whether the LLM call was successful
+            tenders_by_source: Dictionary mapping source names to lists of RawTender objects
+            
+        Returns:
+            Dictionary mapping source names to lists of NormalizationResult objects
         """
-        self.performance_stats["total_processed"] += 1
-        self.performance_stats["llm_used"] += 1
+        results = {}
         
-        if success:
-            self.performance_stats["success_rate"] = (
-                self.performance_stats["llm_used"] / self.performance_stats["total_processed"]
-                if self.performance_stats["total_processed"] > 0
-                else 0
-            )
-        else:
-            self.performance_stats["fallback_used"] += 1
+        for source, tenders in tenders_by_source.items():
+            self.logger.info(f"Processing {len(tenders)} test tenders from {source}")
+            source_results = []
+            
+            for tender in tenders:
+                start_time = time.time()
+                fields_before = len([f for f in tender.model_dump() if tender.model_dump().get(f)])
+                
+                try:
+                    # Normalize the tender
+                    normalized_data = await self.normalize_tender(tender, save_debug=True)
+                    
+                    # Calculate processing time
+                    processing_time = time.time() - start_time
+                    
+                    # Check if normalization was successful
+                    if normalized_data and "normalized_data" in normalized_data:
+                        # Create normalized tender object
+                        normalized_tender = NormalizedTender(
+                            **normalized_data["normalized_data"],
+                            normalized_method=normalized_data.get("method", "unknown"),
+                            processing_time_ms=int(processing_time * 1000)
+                        )
+                        
+                        # Count fields after normalization
+                        fields_after = len([f for f in normalized_tender.model_dump() if normalized_tender.model_dump().get(f)])
+                        
+                        # Calculate improvement percentage
+                        improvement = ((fields_after - fields_before) / fields_before) * 100 if fields_before > 0 else 0
+                        
+                        # Create successful result
+                        result = NormalizationResult(
+                            tender_id=tender.id,
+                            source_table=tender.source_table,
+                            success=True,
+                            normalized_tender=normalized_tender,
+                            error=None,
+                            processing_time=processing_time,
+                            method_used=normalized_data.get("method", "unknown"),
+                            fields_before=fields_before,
+                            fields_after=fields_after,
+                            improvement_percentage=improvement
+                        )
+                    else:
+                        # Create failed result
+                        result = NormalizationResult(
+                            tender_id=tender.id,
+                            source_table=tender.source_table,
+                            success=False,
+                            normalized_tender=None,
+                            error="Normalization returned empty or invalid data",
+                            processing_time=processing_time,
+                            method_used="failed",
+                            fields_before=fields_before,
+                            fields_after=0,
+                            improvement_percentage=0
+                        )
+                except Exception as e:
+                    # Calculate processing time
+                    processing_time = time.time() - start_time
+                    
+                    # Log the error
+                    self.logger.error(f"Error normalizing test tender {tender.id}: {str(e)}")
+                    
+                    # Create error result
+                    result = NormalizationResult(
+                        tender_id=tender.id,
+                        source_table=tender.source_table,
+                        success=False,
+                        normalized_tender=None,
+                        error=str(e),
+                        processing_time=processing_time,
+                        method_used="failed",
+                        fields_before=fields_before,
+                        fields_after=0,
+                        improvement_percentage=0
+                    )
+                
+                # Add result to source results
+                source_results.append(result)
+                
+                # Log result
+                status = "SUCCESS" if result.success else "FAILED"
+                self.logger.info(f"Normalized test tender {tender.id}: {status} (method: {result.method_used}, time: {result.processing_time:.2f}s)")
+                
+            # Add source results to results
+            results[source] = source_results
+            
+            # Log source summary
+            successful = len([r for r in source_results if r.success])
+            self.logger.info(f"Completed {source} test batch: {successful}/{len(source_results)} successful")
+            
+        return results
 
 
 # Create a singleton instance
