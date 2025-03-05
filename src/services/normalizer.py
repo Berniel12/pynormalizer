@@ -454,108 +454,16 @@ class TenderNormalizer:
             # Use direct parsing approach for all tenders
             self.logger.info(f"Using direct parsing for tender {tender_id}")
             
-            # Create normalized data with basic fields
-            normalized_data = {
-                "id": tender.id,
-                "source_table": tender.source_table,
-                "source_id": tender.id,
-                "title": format_title(tender.title or ""),
-                "description": tender.description or "",
-                "country": tender.country or "",
-                "organization_name": tender.organization_name or "",
-            }
-            
-            # Detect and translate title if not in English
-            if tender.title:
-                title_lang = detect_language(tender.title)
-                if title_lang != "en" and title_lang != "unknown":
-                    try:
-                        normalized_data["title"] = format_title(translate_to_english(tender.title, title_lang))
-                        normalized_data["original_language"] = title_lang
-                    except Exception as e:
-                        self.logger.warning(f"Failed to translate title: {str(e)}")
-            
-            # Detect and translate description if not in English
-            if tender.description and len(tender.description) > 10:
-                desc_lang = detect_language(tender.description[:1000])  # Only check first 1000 chars for efficiency
-                if desc_lang != "en" and desc_lang != "unknown":
-                    try:
-                        normalized_data["description"] = translate_to_english(tender.description, desc_lang)
-                        normalized_data["original_language"] = desc_lang
-                    except Exception as e:
-                        self.logger.warning(f"Failed to translate description: {str(e)}")
-            
-            # Extract URLs from description
-            if tender.description:
-                urls = extract_urls_from_text(tender.description)
-                if urls:
-                    normalized_data["extracted_urls"] = urls
-            
-            # Extract emails from description
-            if tender.description:
-                emails = extract_emails_from_text(tender.description)
-                if emails:
-                    normalized_data["extracted_emails"] = emails
-            
-            # Add dates if available
-            if hasattr(tender, "publication_date") and tender.publication_date:
-                normalized_data["publication_date"] = tender.publication_date
-            if hasattr(tender, "deadline_date") and tender.deadline_date:
-                normalized_data["deadline_date"] = tender.deadline_date
-            
-            # Extract URL
-            if hasattr(tender, "url") and tender.url:
-                normalized_data["url"] = tender.url
-            
-            # Try to extract additional fields from source_data if available
-            if hasattr(tender, "source_data") and tender.source_data:
-                source_data = tender.source_data
-                
-                # Recursively extract all fields from source_data
-                self._extract_fields_from_source_data(source_data, normalized_data)
-                
-                # Extract URL if available
-                if "url" in source_data:
-                    normalized_data["url"] = source_data["url"]
-                elif "link" in source_data:
-                    normalized_data["url"] = source_data["link"]
-                
-                # Extract tender type if available
-                if "tender_type" in source_data:
-                    normalized_data["tender_type"] = source_data["tender_type"]
-                elif "type" in source_data:
-                    normalized_data["tender_type"] = source_data["type"]
-                elif "procurement_type" in source_data:
-                    normalized_data["tender_type"] = source_data["procurement_type"]
-                else:
-                    normalized_data["tender_type"] = "unknown"
-                
-                # Extract status if available
-                if "status" in source_data:
-                    normalized_data["status"] = source_data["status"]
-                else:
-                    # Infer status from dates
-                    normalized_data["status"] = self._infer_status_from_dates(normalized_data)
-                
-                # Extract organization details if available
-                if "organization" in source_data:
-                    org_data = source_data["organization"]
-                    if isinstance(org_data, dict):
-                        if "name" in org_data and not normalized_data.get("organization_name"):
-                            normalized_data["organization_name"] = org_data["name"]
-                        if "id" in org_data:
-                            normalized_data["organization_id"] = org_data["id"]
-                
-                # Extract specific fields for different source tables
-                self._extract_source_specific_fields(tender.source_table, source_data, normalized_data)
-            
-            # Ensure status is set
-            if "status" not in normalized_data:
-                normalized_data["status"] = self._infer_status_from_dates(normalized_data)
+            # Get normalized data with source-specific defaults
+            normalized_data = self._parse_fields_directly(tender)
             
             # Update metrics
             end_time = time.time()
             processing_time = end_time - start_time
+            
+            # Track performance
+            self.performance_stats["total_processed"] += 1
+            self.performance_stats["normalization_time"] += processing_time
             
             return {
                 "normalized_data": normalized_data,
@@ -568,27 +476,22 @@ class TenderNormalizer:
             }
             
         except Exception as e:
-            self.logger.error(f"Error in normalize_tender: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            # Log the error
+            error_message = str(e)
+            self.logger.error(f"Error normalizing tender {tender_id}: {error_message}")
             
-            # Return error output
+            # Update metrics
             end_time = time.time()
             processing_time = end_time - start_time
             
             return {
-                "normalized_data": {
-                    "id": tender.id,
-                    "source_table": tender.source_table,
-                    "source_id": tender.id,
-                    "title": tender.title or "",
-                    "description": "Error during normalization",
-                },
+                "normalized_data": None,
                 "used_llm": False,
                 "method": "direct_parsing_error",
                 "processing_time": processing_time,
-                "error": str(e),
+                "error": error_message,
                 "missing_fields": [],
-                "notes": f"Normalization failed: {str(e)}"
+                "notes": f"Error during direct parsing: {error_message}"
             }
     
     def _extract_fields_from_source_data(self, source_data: Dict[str, Any], normalized_data: Dict[str, Any]) -> None:
@@ -921,21 +824,43 @@ class TenderNormalizer:
         # Default status if no dates are available
         return "unknown"
     
-    def normalize_tender_sync(self, tender: RawTender, save_debug: bool = True) -> Dict[str, Any]:
+    def normalize_tender_sync(self, tender: RawTender, source_table: Optional[str] = None) -> Dict[str, Any]:
         """
         Synchronous wrapper for normalize_tender.
-        """
-        import asyncio
         
-        # Create an event loop or get the current one
+        Args:
+            tender: The tender to normalize
+            source_table: Optional override for the source table
+            
+        Returns:
+            Dictionary with normalized data and metadata
+        """
         try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
+            # Create asyncio event loop and run the async method
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(self.normalize_tender(tender))
+            loop.close()
             
-        # Run the async function
-        return loop.run_until_complete(self.normalize_tender(tender, save_debug))
+            # Update success metrics if normalization was successful
+            if result.get("normalized_data") is not None:
+                self.performance_stats["success_rate"] = (self.performance_stats.get("success_rate", 0) + 1) / self.performance_stats.get("total_processed", 1) * 100
+            
+            return result
+            
+        except Exception as e:
+            # Return error output
+            self.logger.error(f"Error in normalize_tender_sync: {str(e)}")
+            
+            return {
+                "normalized_data": None,
+                "used_llm": False,
+                "method": "failed",
+                "processing_time": 0,
+                "error": str(e),
+                "missing_fields": [],
+                "notes": f"Normalization failed: {str(e)}"
+            }
     
     async def normalize_test_batch(self, tenders_by_source: Dict[str, List[RawTender]]) -> Dict[str, List[NormalizationResult]]:
         """
@@ -1062,22 +987,74 @@ class TenderNormalizer:
         
         return self.normalize_tender(tender, source_table)
     
+    def _parse_fields_directly(self, tender: RawTender) -> Dict[str, Any]:
+        """
+        Directly parse fields from the raw tender data as a fallback.
+        """
+        source_table = tender.source_table
+        
+        # Default country values based on source
+        default_country = {
+            "sam_gov": "United States",
+            "ted_eu": "European Union",
+            "ungm": "International",
+            "aiib": "International",
+            "wb": tender.country or "International",
+            "adb": tender.country or "Asia",
+            "iadb": tender.country or "International",
+            "afdb": tender.country or "Africa",
+            "afd_tenders": tender.country or "France"
+        }.get(source_table, tender.country or "")
+        
+        # For sources that need title generation
+        title = tender.title or ""
+        if not title:
+            if source_table == "adb":
+                title = f"ADB Tender: {tender.id}"
+            elif source_table == "iadb":
+                title = f"IADB Project: {tender.id}"
+        
+        # Handle date parsing
+        publication_date = tender.publication_date or ""
+        if source_table == "afd_tenders" and publication_date:
+            try:
+                # Try to parse the date string in the format "Feb 6, 2025"
+                date_obj = datetime.strptime(publication_date, "%b %d, %Y")
+                publication_date = date_obj.isoformat()
+            except ValueError:
+                publication_date = datetime.now().isoformat()
+        
+        # Handle "Unknown" dates for AFDB
+        if source_table == "afdb" and publication_date == "Unknown":
+            publication_date = datetime.now().isoformat()
+        
+        return {
+            "id": tender.id,
+            "source_table": source_table,
+            "source_id": tender.id, 
+            "title": title,
+            "description": tender.description or "",
+            "country": default_country,
+            "organization_name": tender.organization_name or "",
+            "publication_date": publication_date,
+            "url": tender.url or "",
+            "normalized_by": "direct_parsing",
+            "processing_time_ms": 0
+        }
+
     def log_performance_stats(self):
         """Log performance statistics for the normalizer."""
         if hasattr(self, 'performance_stats'):
-            for source, stats in self.performance_stats.items():
-                success_rate = 0
-                if stats['total'] > 0:
-                    success_rate = (stats['success'] / stats['total']) * 100
+            stats = self.performance_stats
+            total = stats.get("total_processed", 0)
+            
+            if total > 0:
+                success_rate = stats.get("success_rate", 0)
+                avg_time = stats.get("normalization_time", 0) / total if total > 0 else 0
                 
-                logging.info(f"Source {source}: {stats['success']}/{stats['total']} successful ({success_rate:.1f}%)")
-                
-                if stats['total'] > 0:
-                    avg_time = stats['total_time'] / stats['total']
-                    logging.info(f"Average processing time: {avg_time:.2f}s")
-                    
-                    if stats['completion_times']:
-                        logging.info(f"Fastest: {min(stats['completion_times']):.2f}s, Slowest: {max(stats['completion_times']):.2f}s")
+                logging.info(f"Total processed: {total}")
+                logging.info(f"Success rate: {success_rate:.1f}%")
+                logging.info(f"Average processing time: {avg_time:.2f}s")
         else:
             logging.info("No performance stats available.")
 
