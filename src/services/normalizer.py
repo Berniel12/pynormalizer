@@ -864,128 +864,113 @@ class TenderNormalizer:
     
     async def normalize_test_batch(self, tenders_by_source: Dict[str, List[RawTender]]) -> Dict[str, List[NormalizationResult]]:
         """
-        Normalize a batch of tenders grouped by source for testing purposes.
+        Normalize a batch of test tenders from multiple sources.
         
         Args:
-            tenders_by_source: Dictionary mapping source names to lists of RawTender objects
+            tenders_by_source: Dictionary mapping source table names to lists of RawTender objects
             
         Returns:
-            Dictionary mapping source names to lists of NormalizationResult objects
+            Dictionary mapping source table names to lists of NormalizationResult objects
         """
-        results = {}
+        results_by_source = {}
         
-        for source, tenders in tenders_by_source.items():
-            self.logger.info(f"Processing {len(tenders)} test tenders from {source}")
-            source_results = []
+        # Process each source table
+        for source_table, tenders in tenders_by_source.items():
+            self.logger.info(f"Processing {len(tenders)} test tenders from {source_table}")
+            results = []
             
+            success_count = 0
+            
+            # Process each tender in the source table
             for tender in tenders:
                 start_time = time.time()
-                fields_before = len([f for f in tender.model_dump() if tender.model_dump().get(f)])
                 
                 try:
                     # Normalize the tender
-                    normalized_data = await self.normalize_tender(tender, save_debug=True)
+                    self.logger.info(f"Normalizing tender {tender.id} from {source_table}")
                     
-                    # Calculate processing time
-                    processing_time = time.time() - start_time
+                    # Save debug data if enabled
+                    if self.config.save_debug_data:
+                        self._save_debug_data(self._create_normalization_input(tender), f"input_{source_table}_{tender.id}")
+                    
+                    # Call the normalize_tender method
+                    result = await self.normalize_tender(tender)
                     
                     # Check if normalization was successful
-                    if normalized_data and "normalized_data" in normalized_data:
-                        # Create normalized tender object
-                        normalized_tender = NormalizedTender(
-                            **normalized_data["normalized_data"],
-                            normalized_method=normalized_data.get("method", "unknown"),
-                            processing_time_ms=int(processing_time * 1000)
-                        )
-                        
-                        # Count fields after normalization
-                        fields_after = len([f for f in normalized_tender.model_dump() if normalized_tender.model_dump().get(f)])
-                        
-                        # Calculate improvement percentage
-                        improvement = ((fields_after - fields_before) / fields_before) * 100 if fields_before > 0 else 0
-                        
-                        # Create successful result
-                        result = NormalizationResult(
-                            tender_id=tender.id,
-                            source_table=tender.source_table,
-                            success=True,
-                            normalized_tender=normalized_tender,
-                            error=None,
-                            processing_time=processing_time,
-                            method_used=normalized_data.get("method", "unknown"),
-                            fields_before=fields_before,
-                            fields_after=fields_after,
-                            improvement_percentage=improvement
-                        )
+                    if result.get("normalized_data") is not None:
+                        success_count += 1
+                        method = result.get("method", "unknown")
                     else:
-                        # Create failed result
-                        result = NormalizationResult(
-                            tender_id=tender.id,
-                            source_table=tender.source_table,
-                            success=False,
-                            normalized_tender=None,
-                            error="Normalization returned empty or invalid data",
-                            processing_time=processing_time,
-                            method_used="failed",
-                            fields_before=fields_before,
-                            fields_after=0,
-                            improvement_percentage=0
-                        )
-                except Exception as e:
-                    # Calculate processing time
-                    processing_time = time.time() - start_time
+                        method = "failed"
                     
+                    # Calculate processing time
+                    end_time = time.time()
+                    processing_time = end_time - start_time
+                    
+                    # Log the result
+                    self.logger.info(f"Normalized test tender {tender.id}: {'SUCCESS' if result.get('normalized_data') is not None else 'FAILED'} (method: {method}, time: {processing_time:.2f}s)")
+                    
+                    # Add to results
+                    results.append({
+                        "tender_id": tender.id,
+                        "source_table": source_table,
+                        "success": result.get("normalized_data") is not None,
+                        "method": method,
+                        "processing_time": processing_time,
+                        "normalized_data": result.get("normalized_data"),
+                        "error": result.get("error")
+                    })
+                    
+                except Exception as e:
                     # Log the error
                     self.logger.error(f"Error normalizing test tender {tender.id}: {str(e)}")
                     
-                    # Create error result
-                    result = NormalizationResult(
-                        tender_id=tender.id,
-                        source_table=tender.source_table,
-                        success=False,
-                        normalized_tender=None,
-                        error=str(e),
-                        processing_time=processing_time,
-                        method_used="failed",
-                        fields_before=fields_before,
-                        fields_after=0,
-                        improvement_percentage=0
-                    )
-                
-                # Add result to source results
-                source_results.append(result)
-                
-                # Log result
-                status = "SUCCESS" if result.success else "FAILED"
-                self.logger.info(f"Normalized test tender {tender.id}: {status} (method: {result.method_used}, time: {result.processing_time:.2f}s)")
-                
-            # Add source results to results
-            results[source] = source_results
+                    # Calculate processing time
+                    end_time = time.time()
+                    processing_time = end_time - start_time
+                    
+                    # Log the result
+                    self.logger.info(f"Normalized test tender {tender.id}: FAILED (method: failed, time: {processing_time:.2f}s)")
+                    
+                    # Add to results
+                    results.append({
+                        "tender_id": tender.id,
+                        "source_table": source_table,
+                        "success": False,
+                        "method": "failed",
+                        "processing_time": processing_time,
+                        "normalized_data": None,
+                        "error": str(e)
+                    })
             
-            # Log source summary
-            successful = len([r for r in source_results if r.success])
-            self.logger.info(f"Completed {source} test batch: {successful}/{len(source_results)} successful")
+            # Log the success rate for this source table
+            self.logger.info(f"Completed {source_table} test batch: {success_count}/{len(tenders)} successful")
             
-        return results
+            # Add to results by source
+            results_by_source[source_table] = results
+        
+        return results_by_source
 
     def normalize_test_tender(self, tender: dict, source_table: str) -> dict:
-        # Handle test tenders that don't come from Supabase
-        tender_id = str(tender.get("id", ""))
-        logging.info(f"Normalizing tender {tender_id} from {source_table}")
+        """
+        Normalize a tender that comes directly from test data (not from Supabase).
         
-        # Debug dump for test input
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        debug_filename = f"debug_dumps/input_{source_table}_{tender_id}_{timestamp}.json"
-        os.makedirs("debug_dumps", exist_ok=True)
+        Args:
+            tender: Dictionary containing tender data
+            source_table: The source table name
+            
+        Returns:
+            Dictionary with normalized data
+        """
+        # Convert dict to RawTender model
+        raw_tender = RawTender(
+            id=tender.get("id", f"test_{source_table}_{int(time.time())}"),
+            source_table=source_table,
+            **tender
+        )
         
-        try:
-            with open(debug_filename, 'w') as f:
-                json.dump(tender, f, indent=2)
-            logging.info(f"Saved debug data to {debug_filename}")
-        except Exception as e:
-            logging.error(f"Error saving debug data: {e}")
-        
-        return self.normalize_tender(tender, source_table)
+        # Use the synchronous normalize_tender method
+        return self.normalize_tender_sync(raw_tender, source_table)
     
     def _parse_fields_directly(self, tender: RawTender) -> Dict[str, Any]:
         """
@@ -1038,8 +1023,7 @@ class TenderNormalizer:
             "organization_name": tender.organization_name or "",
             "publication_date": publication_date,
             "url": tender.url or "",
-            "normalized_by": "direct_parsing",
-            "processing_time_ms": 0
+            "normalized_by": "direct_parsing"
         }
 
     def log_performance_stats(self):
