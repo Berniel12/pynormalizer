@@ -910,8 +910,22 @@ class TenderNormalizer:
                     if result.get("normalized_data") is not None:
                         success_count += 1
                         method = result.get("method", "unknown")
+                        normalized_data = result.get("normalized_data")
+                        
+                        # Create NormalizedTender object if needed
+                        normalized_tender = None
+                        if normalized_data:
+                            try:
+                                normalized_tender = NormalizedTender(
+                                    **normalized_data,
+                                    normalized_method=method,
+                                    processing_time_ms=int((time.time() - start_time) * 1000)
+                                )
+                            except Exception as e:
+                                self.logger.error(f"Error creating NormalizedTender: {str(e)}")
                     else:
                         method = "failed"
+                        normalized_tender = None
                     
                     # Calculate processing time
                     end_time = time.time()
@@ -920,16 +934,22 @@ class TenderNormalizer:
                     # Log the result
                     self.logger.info(f"Normalized test tender {tender.id}: {'SUCCESS' if result.get('normalized_data') is not None else 'FAILED'} (method: {method}, time: {processing_time:.2f}s)")
                     
+                    # Create NormalizationResult object
+                    normalization_result = NormalizationResult(
+                        tender_id=tender.id,
+                        source_table=source_table,
+                        success=result.get("normalized_data") is not None,
+                        normalized_tender=normalized_tender,
+                        error=result.get("error"),
+                        processing_time=processing_time,
+                        method_used=method,
+                        fields_before=len(tender.dict(exclude_none=True)),
+                        fields_after=len(result.get("normalized_data", {})),
+                        improvement_percentage=0.0  # Calculate this if needed
+                    )
+                    
                     # Add to results
-                    results.append({
-                        "tender_id": tender.id,
-                        "source_table": source_table,
-                        "success": result.get("normalized_data") is not None,
-                        "method": method,
-                        "processing_time": processing_time,
-                        "normalized_data": result.get("normalized_data"),
-                        "error": result.get("error")
-                    })
+                    results.append(normalization_result)
                     
                 except Exception as e:
                     # Log the error
@@ -942,16 +962,22 @@ class TenderNormalizer:
                     # Log the result
                     self.logger.info(f"Normalized test tender {tender.id}: FAILED (method: failed, time: {processing_time:.2f}s)")
                     
+                    # Create NormalizationResult object for the error
+                    normalization_result = NormalizationResult(
+                        tender_id=tender.id,
+                        source_table=source_table,
+                        success=False,
+                        normalized_tender=None,
+                        error=str(e),
+                        processing_time=processing_time,
+                        method_used="failed",
+                        fields_before=len(tender.dict(exclude_none=True)),
+                        fields_after=0,
+                        improvement_percentage=0.0
+                    )
+                    
                     # Add to results
-                    results.append({
-                        "tender_id": tender.id,
-                        "source_table": source_table,
-                        "success": False,
-                        "method": "failed",
-                        "processing_time": processing_time,
-                        "normalized_data": None,
-                        "error": str(e)
-                    })
+                    results.append(normalization_result)
             
             # Log the success rate for this source table
             self.logger.info(f"Completed {source_table} test batch: {success_count}/{len(tenders)} successful")
@@ -1043,8 +1069,11 @@ class TenderNormalizer:
             total = stats.get("total_processed", 0)
             
             if total > 0:
-                # Make sure we have a default value of 0 if success_rate is not set
-                success_rate = stats.get("success_rate", 0.0)
+                # Calculate success rate from success_count if available
+                success_count = stats.get("success_count", 0)
+                success_rate = (success_count / total * 100) if total > 0 else 0.0
+                
+                # Calculate average processing time
                 avg_time = stats.get("normalization_time", 0) / total if total > 0 else 0
                 
                 logging.info(f"Total processed: {total}")

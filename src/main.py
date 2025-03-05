@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import logfire
 
@@ -156,7 +156,7 @@ async def process_all_sources(
     return results_by_source
 
 
-async def process_test_batch(limit_per_source: int = 3) -> Dict[str, List[NormalizationResult]]:
+async def process_test_batch(limit_per_source: int = 3) -> Dict[str, List[Dict[str, Any]]]:
     """
     Process a test batch of 3 tenders from each source table with extensive logging.
     
@@ -205,16 +205,23 @@ async def process_test_batch(limit_per_source: int = 3) -> Dict[str, List[Normal
     
     # Mark tenders as processed
     for source, source_results in results.items():
-        successful = [r for r in source_results if r.success and r.normalized_tender]
+        successful = [r for r in source_results if r.get('success') and r.get('normalized_data')]
         
         for result in successful:
-            if result.normalized_tender:
+            if result.get('normalized_data'):
                 try:
-                    saved = await supabase.save_normalized_tender(result.normalized_tender)
+                    # Create NormalizedTender from the normalized data
+                    normalized_tender = NormalizedTender(
+                        **result['normalized_data'],
+                        normalized_method=result.get('method', 'direct_parsing'),
+                        processing_time_ms=int(result.get('processing_time', 0) * 1000)
+                    )
+                    
+                    saved = await supabase.save_normalized_tender(normalized_tender)
                     if not saved:
-                        logger.error(f"Failed to save test tender {result.tender_id} to database")
+                        logger.error(f"Failed to save test tender {result['tender_id']} to database")
                 except Exception as e:
-                    logger.error(f"Error saving test tender {result.tender_id}: {str(e)}")
+                    logger.error(f"Error saving test tender {result['tender_id']}: {str(e)}")
     
     # Print performance stats
     normalizer.log_performance_stats()
@@ -226,7 +233,7 @@ def process_all_tenders(
     limit_per_source: int = 25,
     source_name: Optional[str] = None,
     test_mode: bool = False,
-) -> Dict[str, List[NormalizationResult]]:
+) -> Dict[str, List[Dict[str, Any]]]:
     """
     Synchronous wrapper for processing tenders.
     
