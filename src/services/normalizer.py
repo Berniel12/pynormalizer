@@ -637,59 +637,176 @@ class TenderNormalizer:
             source_data: The source data dictionary
             normalized_data: The normalized data dictionary to update
         """
+        # Default country mappings for sources that don't explicitly provide country
+        source_country_defaults = {
+            "sam_gov": "United States",
+            "ted_eu": "European Union",
+            "ungm": "International",
+            "afd_tenders": "France",  # Default for French Development Agency
+            "iadb": "International",  # Inter-American Development Bank
+            "afdb": "International",  # African Development Bank
+            "aiib": "International",  # Asian Infrastructure Investment Bank
+        }
+        
+        # Apply default country if not set and available in defaults
+        if (not normalized_data.get("country") or normalized_data.get("country") == "") and source_table in source_country_defaults:
+            normalized_data["country"] = source_country_defaults[source_table]
+        
         # Sam.gov specific fields
         if source_table == "sam_gov":
             for field in ["notice_id", "solnbr", "agency", "office", "location", "zip", "naics"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Set United States as the country for all sam.gov tenders
+            normalized_data["country"] = "United States"
+            
+            # Try to extract organization name from agency field if not already set
+            if (not normalized_data.get("organization_name") or normalized_data.get("organization_name") == "") and "agency" in source_data:
+                normalized_data["organization_name"] = source_data["agency"]
         
         # World Bank specific fields
         elif source_table == "wb":
             for field in ["borrower", "project_id", "loan_number", "selection_method"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Extract country from borrower or location fields if available
+            if "borrower" in source_data and (not normalized_data.get("country") or normalized_data.get("country") == ""):
+                normalized_data["country"] = source_data["borrower"]
+            
+            if "location" in source_data and (not normalized_data.get("country") or normalized_data.get("country") == ""):
+                normalized_data["country"] = source_data["location"]
         
         # Asian Development Bank specific fields
         elif source_table == "adb":
             for field in ["project_number", "sector", "loan_number", "closing_date"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Ensure title is set
+            if (not normalized_data.get("title") or normalized_data.get("title") == ""):
+                if "project_name" in source_data:
+                    normalized_data["title"] = source_data["project_name"]
+                elif "name" in source_data:
+                    normalized_data["title"] = source_data["name"]
+                elif "project_title" in source_data:
+                    normalized_data["title"] = source_data["project_title"]
+                elif "subject" in source_data:
+                    normalized_data["title"] = source_data["subject"]
+                else:
+                    # Create a title from project number and country if available
+                    project_number = source_data.get("project_number") or normalized_data.get("id") or "Unknown"
+                    country = normalized_data.get("country") or "Unknown Location"
+                    normalized_data["title"] = f"ADB Project {project_number} - {country}"
         
         # TED EU specific fields
         elif source_table == "ted_eu":
             for field in ["document_number", "regulation", "notice_type", "award_criteria"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Set EU as country if not specified
+            normalized_data["country"] = "European Union"
+            
+            # Try to extract specific EU country if available
+            if "country" in source_data and source_data["country"]:
+                normalized_data["country"] = source_data["country"]
+            elif "member_state" in source_data and source_data["member_state"]:
+                normalized_data["country"] = source_data["member_state"]
         
         # UN Global Marketplace specific fields
         elif source_table == "ungm":
             for field in ["reference", "deadline_timezone", "vendor_city", "vendor_country"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Extract country from vendor_country if available
+            if "vendor_country" in source_data and source_data["vendor_country"]:
+                normalized_data["country"] = source_data["vendor_country"]
+            else:
+                normalized_data["country"] = "International"  # Default for UNGM
         
         # AFD Tenders specific fields
         elif source_table == "afd_tenders":
             for field in ["country_code", "project_ref", "submission_method", "language_code"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Fix date parsing for AFD tenders
+            if "publication_date" in normalized_data and isinstance(normalized_data["publication_date"], str):
+                try:
+                    # Handle various date formats
+                    date_str = normalized_data["publication_date"]
+                    if "," in date_str:  # Format like "Feb 6, 2025"
+                        from dateutil import parser
+                        normalized_data["publication_date"] = parser.parse(date_str).date()
+                except Exception as e:
+                    self.logger.warning(f"Failed to parse publication_date for AFD tender: {e}")
+                    normalized_data["publication_date"] = datetime.now().date()
+            
+            if "deadline_date" in normalized_data and isinstance(normalized_data["deadline_date"], str):
+                try:
+                    # Handle various date formats
+                    date_str = normalized_data["deadline_date"]
+                    if "," in date_str:  # Format like "Feb 6, 2025"
+                        from dateutil import parser
+                        normalized_data["deadline_date"] = parser.parse(date_str).date()
+                except Exception as e:
+                    self.logger.warning(f"Failed to parse deadline_date for AFD tender: {e}")
         
         # Inter-American Development Bank specific fields
         elif source_table == "iadb":
             for field in ["operation_number", "operation_type", "financing_type", "sector_code"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Ensure title is set
+            if (not normalized_data.get("title") or normalized_data.get("title") == ""):
+                if "project_name" in source_data:
+                    normalized_data["title"] = source_data["project_name"]
+                elif "operation_name" in source_data:
+                    normalized_data["title"] = source_data["operation_name"]
+                elif "name" in source_data:
+                    normalized_data["title"] = source_data["name"]
+                else:
+                    # Create a title from operation number if available
+                    operation_num = source_data.get("operation_number") or normalized_data.get("id") or "Unknown"
+                    normalized_data["title"] = f"IADB Project {operation_num}"
         
         # African Development Bank specific fields
         elif source_table == "afdb":
             for field in ["country_code", "funding_source", "sector_code", "task_manager"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Extract country if available
+            if "country" in source_data and source_data["country"]:
+                normalized_data["country"] = source_data["country"]
+            elif "country_name" in source_data and source_data["country_name"]:
+                normalized_data["country"] = source_data["country_name"]
         
         # Asian Infrastructure Investment Bank specific fields
         elif source_table == "aiib":
             for field in ["borrower", "sector", "project_status", "project_timeline"]:
                 if field in source_data:
                     normalized_data[field] = source_data[field]
+            
+            # Extract country from borrower if available
+            if "borrower" in source_data and (not normalized_data.get("country") or normalized_data.get("country") == ""):
+                normalized_data["country"] = source_data["borrower"]
+        
+        # Handle any missing required fields for all sources
+        if not normalized_data.get("country") or normalized_data.get("country") == "":
+            normalized_data["country"] = "International"  # Default fallback
+        
+        if not normalized_data.get("title") or normalized_data.get("title") == "":
+            source_id = normalized_data.get("id") or "Unknown"
+            normalized_data["title"] = f"Tender {source_id} from {source_table}"
+        
+        if not normalized_data.get("description") or normalized_data.get("description") == "":
+            title = normalized_data.get("title") or "Unknown Tender"
+            normalized_data["description"] = f"Details for {title}"
     
     def _infer_status_from_dates(self, data: Dict[str, Any]) -> str:
         """
