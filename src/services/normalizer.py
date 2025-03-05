@@ -771,6 +771,13 @@ class TenderNormalizer:
                     self.logger.warning(f"Failed to parse deadline_date for AFD tender: {e}")
                     # Use a future date as fallback for deadline
                     normalized_data["deadline_date"] = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+            
+            # Ensure country is set for AFD tenders
+            if not normalized_data.get("country") or normalized_data.get("country") == "":
+                if "country" in source_data and source_data["country"]:
+                    normalized_data["country"] = source_data["country"]
+                else:
+                    normalized_data["country"] = "France"  # Default for AFD
         
         # Inter-American Development Bank specific fields
         elif source_table == "iadb":
@@ -843,6 +850,27 @@ class TenderNormalizer:
         if not normalized_data.get("description") or normalized_data.get("description") == "":
             title = normalized_data.get("title") or "Unknown Tender"
             normalized_data["description"] = f"Details for {title}"
+            
+        # Ensure dates are properly formatted
+        for date_field in ["publication_date", "deadline_date"]:
+            if date_field in normalized_data and isinstance(normalized_data[date_field], str):
+                # Try to parse and standardize date format
+                try:
+                    if normalized_data[date_field] in ["Unknown", "unknown", ""]:
+                        if date_field == "publication_date":
+                            normalized_data[date_field] = datetime.now().strftime("%Y-%m-%d")
+                        else:  # deadline_date
+                            normalized_data[date_field] = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+                    elif "," in normalized_data[date_field]:  # Format like "Feb 6, 2025"
+                        from dateutil import parser
+                        parsed_date = parser.parse(normalized_data[date_field]).strftime("%Y-%m-%d")
+                        normalized_data[date_field] = parsed_date
+                except Exception as e:
+                    self.logger.warning(f"Failed to parse {date_field}: {e}")
+                    if date_field == "publication_date":
+                        normalized_data[date_field] = datetime.now().strftime("%Y-%m-%d")
+                    else:  # deadline_date
+                        normalized_data[date_field] = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     
     def _infer_status_from_dates(self, data: Dict[str, Any]) -> str:
         """
