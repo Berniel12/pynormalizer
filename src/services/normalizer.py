@@ -356,6 +356,7 @@ class TenderNormalizer:
         self.performance_stats = {
             "total_processed": 0,
             "normalization_time": 0,
+            "success_count": 0,
             "success_rate": 0,
         }
     
@@ -826,17 +827,21 @@ class TenderNormalizer:
     
     def normalize_tender_sync(self, tender: RawTender, source_table: Optional[str] = None) -> Dict[str, Any]:
         """
-        Synchronous wrapper for normalize_tender.
+        Synchronously normalize a tender.
         
         Args:
             tender: The tender to normalize
-            source_table: Optional override for the source table
+            source_table: Optional source table name override
             
         Returns:
             Dictionary with normalized data and metadata
         """
         try:
-            # Create asyncio event loop and run the async method
+            if source_table:
+                # Override source table if provided
+                tender.source_table = source_table
+            
+            # Create a new event loop
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             result = loop.run_until_complete(self.normalize_tender(tender))
@@ -844,7 +849,12 @@ class TenderNormalizer:
             
             # Update success metrics if normalization was successful
             if result.get("normalized_data") is not None:
-                self.performance_stats["success_rate"] = (self.performance_stats.get("success_rate", 0) + 1) / self.performance_stats.get("total_processed", 1) * 100
+                # Increment success count
+                self.performance_stats["success_count"] += 1
+                
+                # Calculate success rate
+                total = self.performance_stats.get("total_processed", 1)
+                self.performance_stats["success_rate"] = (self.performance_stats["success_count"] / total) * 100
             
             return result
             
@@ -859,7 +869,7 @@ class TenderNormalizer:
                 "processing_time": 0,
                 "error": str(e),
                 "missing_fields": [],
-                "notes": f"Normalization failed: {str(e)}"
+                "notes": f"Error during synchronous normalization: {str(e)}"
             }
     
     async def normalize_test_batch(self, tenders_by_source: Dict[str, List[RawTender]]) -> Dict[str, List[NormalizationResult]]:
@@ -1033,7 +1043,8 @@ class TenderNormalizer:
             total = stats.get("total_processed", 0)
             
             if total > 0:
-                success_rate = stats.get("success_rate", 0)
+                # Make sure we have a default value of 0 if success_rate is not set
+                success_rate = stats.get("success_rate", 0.0)
                 avg_time = stats.get("normalization_time", 0) / total if total > 0 else 0
                 
                 logging.info(f"Total processed: {total}")
